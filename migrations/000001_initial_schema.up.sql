@@ -10,17 +10,14 @@ CREATE TABLE wallets (
     CONSTRAINT wallets_player_currency_unique
         UNIQUE (player_id, currency),
 
-    CONSTRAINT wallets_player_id_not_blank
-        CHECK (btrim(player_id) <> ''),
-
-    CONSTRAINT wallets_currency_format
-        CHECK (currency ~ '^[A-Z]{3}$'),
-
     CONSTRAINT wallets_balance_non_negative
         CHECK (balance >= 0),
 
     CONSTRAINT wallets_version_positive
         CHECK (version >= 1),
+
+    CONSTRAINT wallets_currency_format
+        CHECK (currency ~ '^[A-Z]{3}$'),
 
     CONSTRAINT wallets_timestamps_valid
         CHECK (updated_at >= created_at)
@@ -28,27 +25,44 @@ CREATE TABLE wallets (
 
 CREATE TABLE wager_transactions (
     id TEXT PRIMARY KEY,
-    external_transaction_id TEXT,
-    provider_id TEXT,
-    idempotency_key TEXT,
-    payload_hash TEXT,
+    external_transaction_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+
     wallet_id TEXT NOT NULL,
     player_id TEXT NOT NULL,
-    round_id TEXT,
-    game_id TEXT,
+    round_id TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+
     kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+
     amount BIGINT NOT NULL,
     currency CHAR(3) NOT NULL,
-    status TEXT NOT NULL,
+
     reference_external_transaction_id TEXT,
+    reference_transaction_id TEXT,
+
     failure_code TEXT,
     result_balance BIGINT,
+
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
 
     CONSTRAINT wager_transactions_wallet_fk
         FOREIGN KEY (wallet_id)
         REFERENCES wallets (id),
+
+    CONSTRAINT wager_transactions_reference_transaction_fk
+        FOREIGN KEY (reference_transaction_id)
+        REFERENCES wager_transactions (id),
+
+    CONSTRAINT wager_transactions_provider_external_unique
+        UNIQUE (provider_id, external_transaction_id),
+
+    CONSTRAINT wager_transactions_provider_idempotency_unique
+        UNIQUE (provider_id, idempotency_key),
 
     CONSTRAINT wager_transactions_kind_valid
         CHECK (
@@ -73,11 +87,11 @@ CREATE TABLE wager_transactions (
             )
         ),
 
-    CONSTRAINT wager_transactions_currency_format
-        CHECK (currency ~ '^[A-Z]{3}$'),
-
     CONSTRAINT wager_transactions_amount_non_negative
         CHECK (amount >= 0),
+
+    CONSTRAINT wager_transactions_currency_format
+        CHECK (currency ~ '^[A-Z]{3}$'),
 
     CONSTRAINT wager_transactions_result_balance_non_negative
         CHECK (
@@ -91,10 +105,7 @@ CREATE TABLE wager_transactions (
     CONSTRAINT wager_transactions_reference_required
         CHECK (
             kind NOT IN ('REFUND', 'ROLLBACK')
-            OR (
-                reference_external_transaction_id IS NOT NULL
-                AND btrim(reference_external_transaction_id) <> ''
-            )
+            OR reference_external_transaction_id IS NOT NULL
         ),
 
     CONSTRAINT wager_transactions_failure_code_valid
@@ -102,98 +113,45 @@ CREATE TABLE wager_transactions (
             (
                 status IN ('REJECTED', 'FAILED')
                 AND failure_code IS NOT NULL
-                AND btrim(failure_code) <> ''
             )
             OR
             (
                 status NOT IN ('REJECTED', 'FAILED')
                 AND failure_code IS NULL
             )
-        ),
-
-    CONSTRAINT wager_transactions_opening_internal
-        CHECK (
-            kind <> 'OPENING'
-            OR (
-                external_transaction_id IS NULL
-                AND provider_id IS NULL
-                AND idempotency_key IS NULL
-                AND payload_hash IS NULL
-                AND round_id IS NULL
-                AND game_id IS NULL
-                AND reference_external_transaction_id IS NULL
-                AND status = 'PROCESSED'
-                AND result_balance IS NOT NULL
-                AND amount > 0
-            )
-        ),
-
-    CONSTRAINT wager_transactions_external_fields
-        CHECK (
-            kind = 'OPENING'
-            OR (
-                external_transaction_id IS NOT NULL
-                AND btrim(external_transaction_id) <> ''
-                AND provider_id IS NOT NULL
-                AND btrim(provider_id) <> ''
-                AND idempotency_key IS NOT NULL
-                AND btrim(idempotency_key) <> ''
-                AND payload_hash IS NOT NULL
-                AND btrim(payload_hash) <> ''
-                AND round_id IS NOT NULL
-                AND btrim(round_id) <> ''
-                AND game_id IS NOT NULL
-                AND btrim(game_id) <> ''
-            )
         )
 );
 
-CREATE UNIQUE INDEX wager_transactions_provider_external_unique
-    ON wager_transactions (
-        provider_id,
-        external_transaction_id
-    )
-    WHERE provider_id IS NOT NULL
-      AND external_transaction_id IS NOT NULL;
-
-CREATE UNIQUE INDEX wager_transactions_provider_idempotency_unique
-    ON wager_transactions (
-        provider_id,
-        idempotency_key
-    )
-    WHERE provider_id IS NOT NULL
-      AND idempotency_key IS NOT NULL;
-
-CREATE INDEX wager_transactions_wallet_created_idx
-    ON wager_transactions (
-        wallet_id,
-        created_at,
-        id
-    );
-
-CREATE INDEX wager_transactions_reference_idx
+CREATE INDEX wager_transactions_reference_external_idx
     ON wager_transactions (
         provider_id,
         reference_external_transaction_id
     )
     WHERE reference_external_transaction_id IS NOT NULL;
 
+CREATE INDEX wager_transactions_reference_transaction_idx
+    ON wager_transactions (reference_transaction_id)
+    WHERE reference_transaction_id IS NOT NULL;
+
 CREATE INDEX wager_transactions_pending_reference_idx
-    ON wager_transactions (
-        updated_at,
-        id
-    )
+    ON wager_transactions (created_at, id)
     WHERE status = 'PENDING_REFERENCE';
+
+CREATE INDEX wager_transactions_wallet_created_idx
+    ON wager_transactions (wallet_id, created_at, id);
 
 CREATE TABLE ledger_entries (
     id TEXT PRIMARY KEY,
     wallet_id TEXT NOT NULL,
     transaction_id TEXT NOT NULL,
+
     direction TEXT NOT NULL,
     amount BIGINT NOT NULL,
     currency CHAR(3) NOT NULL,
+
     balance_before BIGINT NOT NULL,
     balance_after BIGINT NOT NULL,
+
     created_at TIMESTAMPTZ NOT NULL,
 
     CONSTRAINT ledger_entries_wallet_fk
@@ -204,17 +162,17 @@ CREATE TABLE ledger_entries (
         FOREIGN KEY (transaction_id)
         REFERENCES wager_transactions (id),
 
-    CONSTRAINT ledger_entries_transaction_unique
-        UNIQUE (transaction_id),
+    CONSTRAINT ledger_entries_wallet_transaction_unique
+        UNIQUE (wallet_id, transaction_id),
 
     CONSTRAINT ledger_entries_direction_valid
         CHECK (direction IN ('CREDIT', 'DEBIT')),
 
-    CONSTRAINT ledger_entries_currency_format
-        CHECK (currency ~ '^[A-Z]{3}$'),
-
     CONSTRAINT ledger_entries_amount_positive
         CHECK (amount > 0),
+
+    CONSTRAINT ledger_entries_currency_format
+        CHECK (currency ~ '^[A-Z]{3}$'),
 
     CONSTRAINT ledger_entries_balance_before_non_negative
         CHECK (balance_before >= 0),
@@ -236,21 +194,15 @@ CREATE TABLE ledger_entries (
         )
 );
 
-CREATE INDEX ledger_entries_wallet_cursor_idx
-    ON ledger_entries (
-        wallet_id,
-        created_at,
-        id
-    );
+CREATE INDEX ledger_entries_wallet_created_idx
+    ON ledger_entries (wallet_id, created_at, id);
 
 CREATE OR REPLACE FUNCTION prevent_ledger_mutation()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
+RETURNS TRIGGER AS $$
 BEGIN
     RAISE EXCEPTION 'ledger entries are append-only';
 END;
-$$;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ledger_entries_prevent_update
 BEFORE UPDATE ON ledger_entries

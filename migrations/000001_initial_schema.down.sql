@@ -7,5 +7,7 @@ DROP TRIGGER IF EXISTS ledger_entries_prevent_update
 DROP FUNCTION IF EXISTS prevent_ledger_mutation();
 
 DROP TABLE IF EXISTS ledger_entries;
+
 DROP TABLE IF EXISTS wager_transactions;
+
 DROP TABLE IF EXISTS wallets;
