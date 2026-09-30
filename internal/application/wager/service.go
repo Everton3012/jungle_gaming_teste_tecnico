@@ -20,6 +20,8 @@ import (
 var (
 	ErrServiceRequired         = errors.New("wager service dependencies are required")
 	ErrTransactionRequired     = errors.New("wager transaction is required")
+	ErrReferenceRequired       = errors.New("reference transaction is required")
+	ErrNotPendingReference     = errors.New("transaction is not pending reference")
 	ErrIdempotencyConflict     = errors.New("idempotency key already used with different payload")
 	ErrExternalIDConflict      = errors.New("external transaction id already used with different operation")
 	ErrConcurrentRetryExceeded = errors.New("concurrent wallet update retry limit exceeded")
@@ -91,9 +93,35 @@ func (s *Service) Process(
 			return ProcessResult{}, err
 		}
 
-		// A tentativa que perdeu a corrida já sofreu rollback.
-		// Na próxima tentativa, a transação vencedora estará
-		// disponível para ser encontrada como replay.
+		if err := waitForRetry(ctx, attempt); err != nil {
+			return ProcessResult{}, err
+		}
+	}
+
+	return ProcessResult{}, ErrConcurrentRetryExceeded
+}
+
+func (s *Service) ResumePendingReference(
+	ctx context.Context,
+	transactionID string,
+	ledgerEntryID string,
+	occurredAt time.Time,
+) (ProcessResult, error) {
+	for attempt := 0; attempt < s.maxRetries; attempt++ {
+		result, retry, err := s.resumePendingReferenceAttempt(
+			ctx,
+			transactionID,
+			ledgerEntryID,
+			occurredAt,
+		)
+		if err == nil {
+			return result, nil
+		}
+
+		if !retry {
+			return ProcessResult{}, err
+		}
+
 		if err := waitForRetry(ctx, attempt); err != nil {
 			return ProcessResult{}, err
 		}
@@ -260,6 +288,165 @@ func (s *Service) processAttempt(
 	return ProcessResult{}, false, err
 }
 
+func (s *Service) resumePendingReferenceAttempt(
+	ctx context.Context,
+	transactionID string,
+	ledgerEntryID string,
+	occurredAt time.Time,
+) (ProcessResult, bool, error) {
+	var result ProcessResult
+
+	err := s.transactionManager.WithinTransaction(
+		ctx,
+		func(ctx context.Context, tx pgx.Tx) error {
+			txWalletRepository, err :=
+				s.walletRepository.WithDB(tx)
+			if err != nil {
+				return err
+			}
+
+			txTransactionRepository, err :=
+				s.transactionRepository.WithDB(tx)
+			if err != nil {
+				return err
+			}
+
+			txLedgerRepository, err :=
+				s.ledgerRepository.WithDB(tx)
+			if err != nil {
+				return err
+			}
+
+			pending, err :=
+				txTransactionRepository.FindByID(
+					ctx,
+					transactionID,
+				)
+			if err != nil {
+				return err
+			}
+
+			// Outra instância pode ter concluído enquanto este worker
+			// aguardava para executar.
+			if pending.Status() == domaintransaction.StatusProcessed {
+				balance, ok := pending.ResultBalance()
+				if !ok {
+					return fmt.Errorf(
+						"processed transaction has no result balance",
+					)
+				}
+
+				result = ProcessResult{
+					Transaction: pending,
+					Balance:     balance.Amount(),
+					Currency:    balance.Currency(),
+					Replayed:    true,
+				}
+
+				return nil
+			}
+
+			if pending.Status() !=
+				domaintransaction.StatusPendingReference {
+				return ErrNotPendingReference
+			}
+
+			if pending.ReferenceExternalTransactionID() == "" {
+				return ErrReferenceRequired
+			}
+
+			reference, err :=
+				txTransactionRepository.FindByProviderExternalID(
+					ctx,
+					pending.ProviderID(),
+					pending.ReferenceExternalTransactionID(),
+				)
+			if errors.Is(err, transactionpostgres.ErrNotFound) {
+				return ErrReferenceRequired
+			}
+			if err != nil {
+				return err
+			}
+
+			walletEntity, err :=
+				txWalletRepository.FindByID(
+					ctx,
+					pending.WalletID(),
+				)
+			if err != nil {
+				return err
+			}
+
+			expectedVersion := walletEntity.Version()
+
+			pendingCopy := *pending
+			referenceCopy := *reference
+
+			domainResult, err := s.processor.Process(
+				walletEntity,
+				&pendingCopy,
+				&referenceCopy,
+				ledgerEntryID,
+				occurredAt,
+			)
+			if err != nil {
+				return err
+			}
+
+			if err := txWalletRepository.Update(
+				ctx,
+				walletEntity,
+				expectedVersion,
+			); err != nil {
+				return err
+			}
+
+			// Aqui a operação já existe no banco.
+			// Portanto é UPDATE, não CREATE.
+			if err := txTransactionRepository.Update(
+				ctx,
+				&pendingCopy,
+			); err != nil {
+				return err
+			}
+
+			entry, hasLedger := domainResult.LedgerEntry()
+			if hasLedger {
+				if err := txLedgerRepository.Create(
+					ctx,
+					&entry,
+				); err != nil {
+					return err
+				}
+			}
+
+			result = ProcessResult{
+				Transaction: &pendingCopy,
+				Balance:     domainResult.Balance().Amount(),
+				Currency:    domainResult.Balance().Currency(),
+				Replayed:    false,
+			}
+
+			return nil
+		},
+	)
+
+	if err == nil {
+		return result, false, nil
+	}
+
+	if errors.Is(err, walletpostgres.ErrConcurrentUpdate) {
+		return ProcessResult{}, true, err
+	}
+
+	if isLedgerUniqueViolation(err) {
+		// Outra instância pode ter concluído a mesma pendência.
+		return ProcessResult{}, true, err
+	}
+
+	return ProcessResult{}, false, err
+}
+
 func replayResult(
 	existing *domaintransaction.WagerTransaction,
 	incoming *domaintransaction.WagerTransaction,
@@ -298,6 +485,26 @@ func isUniqueViolation(err error) bool {
 	switch pgErr.ConstraintName {
 	case "wager_transactions_provider_external_unique",
 		"wager_transactions_provider_idempotency_unique":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLedgerUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+
+	if pgErr.Code != "23505" {
+		return false
+	}
+
+	switch pgErr.ConstraintName {
+	case "ledger_entries_pkey",
+		"ledger_entries_wallet_transaction_unique":
 		return true
 	default:
 		return false
