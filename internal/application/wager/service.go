@@ -8,6 +8,7 @@ import (
 
 	domainwager "jungle_gaming_teste_tecnico/internal/domain/wager"
 	domaintransaction "jungle_gaming_teste_tecnico/internal/domain/wagertransaction"
+	domainwallet "jungle_gaming_teste_tecnico/internal/domain/wallet"
 	postgresinfra "jungle_gaming_teste_tecnico/internal/infrastructure/postgres"
 	ledgerpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/ledger"
 	transactionpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wagertransaction"
@@ -175,10 +176,30 @@ func (s *Service) processAttempt(
 					return err
 				}
 
+				if existing.Status() ==
+					domaintransaction.StatusPendingReference {
+					walletEntity, err :=
+						txWalletRepository.FindByID(
+							ctx,
+							existing.WalletID(),
+						)
+					if err != nil {
+						return err
+					}
+
+					replay.Balance =
+						walletEntity.Balance().Amount()
+					replay.Currency =
+						walletEntity.Balance().Currency()
+				}
+
 				result = replay
 				return nil
 
-			case !errors.Is(err, transactionpostgres.ErrNotFound):
+			case !errors.Is(
+				err,
+				transactionpostgres.ErrNotFound,
+			):
 				return err
 			}
 
@@ -200,10 +221,30 @@ func (s *Service) processAttempt(
 					return err
 				}
 
+				if existing.Status() ==
+					domaintransaction.StatusPendingReference {
+					walletEntity, err :=
+						txWalletRepository.FindByID(
+							ctx,
+							existing.WalletID(),
+						)
+					if err != nil {
+						return err
+					}
+
+					replay.Balance =
+						walletEntity.Balance().Amount()
+					replay.Currency =
+						walletEntity.Balance().Currency()
+				}
+
 				result = replay
 				return nil
 
-			case !errors.Is(err, transactionpostgres.ErrNotFound):
+			case !errors.Is(
+				err,
+				transactionpostgres.ErrNotFound,
+			):
 				return err
 			}
 
@@ -220,10 +261,14 @@ func (s *Service) processAttempt(
 
 			transactionCopy := *input.Transaction
 
-			var referenceCopy *domaintransaction.WagerTransaction
-			if input.Reference != nil {
-				value := *input.Reference
-				referenceCopy = &value
+			referenceCopy, err := resolveProcessReference(
+				ctx,
+				txTransactionRepository,
+				&transactionCopy,
+				input.Reference,
+			)
+			if err != nil {
+				return err
 			}
 
 			domainResult, err := s.processor.Process(
@@ -233,7 +278,38 @@ func (s *Service) processAttempt(
 				input.LedgerEntryID,
 				input.OccurredAt,
 			)
+
 			if err != nil {
+				if errors.Is(
+					err,
+					domainwager.ErrReferenceRequired,
+				) &&
+					transactionCopy.Kind().RequiresReference() {
+
+					return persistPendingReference(
+						ctx,
+						txTransactionRepository,
+						walletEntity,
+						&transactionCopy,
+						input.OccurredAt,
+						&result,
+					)
+				}
+
+				if errors.Is(
+					err,
+					domainwallet.ErrInsufficientBalance,
+				) {
+					return persistInsufficientFundsRejection(
+						ctx,
+						txTransactionRepository,
+						walletEntity,
+						&transactionCopy,
+						input.OccurredAt,
+						&result,
+					)
+				}
+
 				return err
 			}
 
@@ -253,6 +329,7 @@ func (s *Service) processAttempt(
 			}
 
 			entry, hasLedger := domainResult.LedgerEntry()
+
 			if hasLedger {
 				if err := txLedgerRepository.Create(
 					ctx,
@@ -277,7 +354,10 @@ func (s *Service) processAttempt(
 		return result, false, nil
 	}
 
-	if errors.Is(err, walletpostgres.ErrConcurrentUpdate) {
+	if errors.Is(
+		err,
+		walletpostgres.ErrConcurrentUpdate,
+	) {
 		return ProcessResult{}, true, err
 	}
 
@@ -286,6 +366,131 @@ func (s *Service) processAttempt(
 	}
 
 	return ProcessResult{}, false, err
+}
+
+func resolveProcessReference(
+	ctx context.Context,
+	transactionRepository *transactionpostgres.Repository,
+	transaction *domaintransaction.WagerTransaction,
+	providedReference *domaintransaction.WagerTransaction,
+) (*domaintransaction.WagerTransaction, error) {
+	if transaction == nil {
+		return nil, ErrTransactionRequired
+	}
+
+	if !transaction.Kind().RequiresReference() &&
+		transaction.ReferenceExternalTransactionID() == "" {
+		return nil, nil
+	}
+
+	/*
+		Permite referência explicitamente fornecida por chamadas
+		internas/testes, mas o caso de uso não depende dela.
+	*/
+	if providedReference != nil {
+		value := *providedReference
+		return &value, nil
+	}
+
+	referenceExternalID :=
+		transaction.ReferenceExternalTransactionID()
+
+	if referenceExternalID == "" {
+		return nil, nil
+	}
+
+	reference, err :=
+		transactionRepository.FindByProviderExternalID(
+			ctx,
+			transaction.ProviderID(),
+			referenceExternalID,
+		)
+
+	if errors.Is(
+		err,
+		transactionpostgres.ErrNotFound,
+	) {
+		/*
+			Referência ainda não chegou.
+
+			Retornar nil é proposital:
+			o Processor produzirá ErrReferenceRequired
+			e o fluxo existente persistirá PENDING_REFERENCE.
+		*/
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	value := *reference
+
+	return &value, nil
+}
+
+func persistPendingReference(
+	ctx context.Context,
+	transactionRepository *transactionpostgres.Repository,
+	walletEntity *domainwallet.Wallet,
+	transaction *domaintransaction.WagerTransaction,
+	occurredAt time.Time,
+	result *ProcessResult,
+) error {
+	if err := transaction.MarkPendingReference(
+		occurredAt,
+	); err != nil {
+		return err
+	}
+
+	if err := transactionRepository.Create(
+		ctx,
+		transaction,
+	); err != nil {
+		return err
+	}
+
+	*result = ProcessResult{
+		Transaction: transaction,
+		Balance:     walletEntity.Balance().Amount(),
+		Currency:    walletEntity.Balance().Currency(),
+		Replayed:    false,
+	}
+
+	return nil
+}
+
+func persistInsufficientFundsRejection(
+	ctx context.Context,
+	transactionRepository *transactionpostgres.Repository,
+	walletEntity *domainwallet.Wallet,
+	transaction *domaintransaction.WagerTransaction,
+	occurredAt time.Time,
+	result *ProcessResult,
+) error {
+	if err := transaction.MarkRejected(
+		domaintransaction.FailureCodeInsufficientFunds,
+		walletEntity.Balance(),
+		occurredAt,
+	); err != nil {
+		return err
+	}
+
+	if err := transactionRepository.Create(
+		ctx,
+		transaction,
+	); err != nil {
+		return err
+	}
+
+	*result = ProcessResult{
+		Transaction: transaction,
+		Balance:     walletEntity.Balance().Amount(),
+		Currency:    walletEntity.Balance().Currency(),
+		Replayed:    false,
+	}
+
+	return nil
 }
 
 func (s *Service) resumePendingReferenceAttempt(
@@ -326,9 +531,8 @@ func (s *Service) resumePendingReferenceAttempt(
 				return err
 			}
 
-			// Outra instância pode ter concluído enquanto este worker
-			// aguardava para executar.
-			if pending.Status() == domaintransaction.StatusProcessed {
+			if pending.Status() ==
+				domaintransaction.StatusProcessed {
 				balance, ok := pending.ResultBalance()
 				if !ok {
 					return fmt.Errorf(
@@ -361,9 +565,14 @@ func (s *Service) resumePendingReferenceAttempt(
 					pending.ProviderID(),
 					pending.ReferenceExternalTransactionID(),
 				)
-			if errors.Is(err, transactionpostgres.ErrNotFound) {
+
+			if errors.Is(
+				err,
+				transactionpostgres.ErrNotFound,
+			) {
 				return ErrReferenceRequired
 			}
+
 			if err != nil {
 				return err
 			}
@@ -401,8 +610,6 @@ func (s *Service) resumePendingReferenceAttempt(
 				return err
 			}
 
-			// Aqui a operação já existe no banco.
-			// Portanto é UPDATE, não CREATE.
 			if err := txTransactionRepository.Update(
 				ctx,
 				&pendingCopy,
@@ -411,6 +618,7 @@ func (s *Service) resumePendingReferenceAttempt(
 			}
 
 			entry, hasLedger := domainResult.LedgerEntry()
+
 			if hasLedger {
 				if err := txLedgerRepository.Create(
 					ctx,
@@ -435,12 +643,14 @@ func (s *Service) resumePendingReferenceAttempt(
 		return result, false, nil
 	}
 
-	if errors.Is(err, walletpostgres.ErrConcurrentUpdate) {
+	if errors.Is(
+		err,
+		walletpostgres.ErrConcurrentUpdate,
+	) {
 		return ProcessResult{}, true, err
 	}
 
 	if isLedgerUniqueViolation(err) {
-		// Outra instância pode ter concluído a mesma pendência.
 		return ProcessResult{}, true, err
 	}
 
@@ -456,8 +666,17 @@ func replayResult(
 		return ProcessResult{}, conflictError
 	}
 
-	balance, ok := existing.ResultBalance()
-	if !ok {
+	balance, hasBalance := existing.ResultBalance()
+
+	if !hasBalance {
+		if existing.Status() ==
+			domaintransaction.StatusPendingReference {
+			return ProcessResult{
+				Transaction: existing,
+				Replayed:    true,
+			}, nil
+		}
+
 		return ProcessResult{}, fmt.Errorf(
 			"idempotent transaction has no result balance",
 		)
@@ -486,9 +705,22 @@ func isUniqueViolation(err error) bool {
 	case "wager_transactions_provider_external_unique",
 		"wager_transactions_provider_idempotency_unique":
 		return true
+
 	default:
 		return false
 	}
+}
+
+func isReversalUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+
+	return pgErr.Code == "23505" &&
+		pgErr.ConstraintName ==
+			"wager_transactions_processed_reversal_unique"
 }
 
 func isLedgerUniqueViolation(err error) bool {
@@ -506,6 +738,7 @@ func isLedgerUniqueViolation(err error) bool {
 	case "ledger_entries_pkey",
 		"ledger_entries_wallet_transaction_unique":
 		return true
+
 	default:
 		return false
 	}
@@ -515,7 +748,10 @@ func waitForRetry(
 	ctx context.Context,
 	attempt int,
 ) error {
-	delay := time.Duration(attempt+1) * 5 * time.Millisecond
+	delay :=
+		time.Duration(attempt+1) *
+			5 *
+			time.Millisecond
 
 	timer := time.NewTimer(delay)
 	defer timer.Stop()

@@ -172,6 +172,15 @@ CREATE INDEX wager_transactions_pending_reference_idx
     )
     WHERE status = 'PENDING_REFERENCE';
 
+-- Uma transação financeira pode ser revertida apenas uma vez.
+-- REFUND e ROLLBACK competem pela mesma referência.
+CREATE UNIQUE INDEX wager_transactions_processed_reversal_unique
+    ON wager_transactions (
+        reference_transaction_id
+    )
+    WHERE kind IN ('REFUND', 'ROLLBACK')
+      AND status = 'PROCESSED'
+      AND reference_transaction_id IS NOT NULL;
 
 CREATE TABLE ledger_entries (
     id TEXT PRIMARY KEY,
@@ -237,7 +246,6 @@ CREATE INDEX ledger_entries_wallet_created_idx
         created_at,
         id
     );
-
 
 CREATE OR REPLACE FUNCTION prevent_ledger_mutation()
 RETURNS TRIGGER AS $$

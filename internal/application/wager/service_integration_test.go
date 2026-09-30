@@ -496,7 +496,10 @@ func TestServiceSameBet50TimesConcurrently(t *testing.T) {
 	const workers = 50
 
 	start := make(chan struct{})
-	results := make(chan applicationwager.ProcessResult, workers)
+	results := make(
+		chan applicationwager.ProcessResult,
+		workers,
+	)
 	errs := make(chan error, workers)
 
 	var wg sync.WaitGroup
@@ -622,6 +625,8 @@ func TestServiceSameBet50TimesConcurrently(t *testing.T) {
 func TestServiceTwoBets80AgainstBalance100(t *testing.T) {
 	env := newTestEnvironment(t)
 
+	ctx := context.Background()
+
 	createWallet(
 		t,
 		env,
@@ -630,102 +635,332 @@ func TestServiceTwoBets80AgainstBalance100(t *testing.T) {
 		10000,
 	)
 
-	start := make(chan struct{})
+	firstBet := newBet(
+		t,
+		"transaction-bet-80-a",
+		"external-bet-80-a",
+		"idempotency-bet-80-a",
+		"hash-bet-80-a",
+		"wallet-two-bets",
+		"player-two-bets",
+		8000,
+	)
 
-	var wg sync.WaitGroup
+	secondBet := newBet(
+		t,
+		"transaction-bet-80-b",
+		"external-bet-80-b",
+		"idempotency-bet-80-b",
+		"hash-bet-80-b",
+		"wallet-two-bets",
+		"player-two-bets",
+		8000,
+	)
 
-	errs := make(chan error, 2)
-
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-
-		go func(index int) {
-			defer wg.Done()
-
-			<-start
-
-			transaction := newBet(
-				t,
-				fmt.Sprintf("transaction-two-%d", index),
-				fmt.Sprintf("external-two-%d", index),
-				fmt.Sprintf("idempotency-two-%d", index),
-				fmt.Sprintf("hash-two-%d", index),
-				"wallet-two-bets",
-				"player-two-bets",
-				8000,
-			)
-
-			_, err := env.service.Process(
-				context.Background(),
-				applicationwager.ProcessInput{
-					Transaction: transaction,
-					LedgerEntryID: fmt.Sprintf(
-						"ledger-two-%d",
-						index,
-					),
-					OccurredAt: time.Now().UTC(),
-				},
-			)
-
-			errs <- err
-		}(i)
+	type operationResult struct {
+		result applicationwager.ProcessResult
+		err    error
 	}
 
-	close(start)
+	start := make(chan struct{})
+	results := make(chan operationResult, 2)
 
-	wg.Wait()
-	close(errs)
+	process := func(
+		transaction *domaintransaction.WagerTransaction,
+		ledgerEntryID string,
+	) {
+		<-start
 
-	successCount := 0
-	failureCount := 0
+		result, err := env.service.Process(
+			ctx,
+			applicationwager.ProcessInput{
+				Transaction:   transaction,
+				LedgerEntryID: ledgerEntryID,
+				OccurredAt:    time.Now().UTC(),
+			},
+		)
 
-	for err := range errs {
-		if err == nil {
-			successCount++
-		} else {
-			failureCount++
+		results <- operationResult{
+			result: result,
+			err:    err,
 		}
 	}
 
-	if successCount != 1 {
+	go process(
+		firstBet,
+		"ledger-bet-80-a",
+	)
+
+	go process(
+		secondBet,
+		"ledger-bet-80-b",
+	)
+
+	close(start)
+
+	var processedResult *applicationwager.ProcessResult
+	var rejectedResult *applicationwager.ProcessResult
+
+	for i := 0; i < 2; i++ {
+		operation := <-results
+
+		if operation.err != nil {
+			t.Fatalf(
+				"process concurrent bet: %v",
+				operation.err,
+			)
+		}
+
+		if operation.result.Transaction == nil {
+			t.Fatal("result transaction must not be nil")
+		}
+
+		switch operation.result.Transaction.Status() {
+		case domaintransaction.StatusProcessed:
+			if processedResult != nil {
+				t.Fatal("more than one bet was processed")
+			}
+
+			value := operation.result
+			processedResult = &value
+
+		case domaintransaction.StatusRejected:
+			if rejectedResult != nil {
+				t.Fatal("more than one bet was rejected")
+			}
+
+			value := operation.result
+			rejectedResult = &value
+
+		default:
+			t.Fatalf(
+				"unexpected transaction status: %s",
+				operation.result.Transaction.Status(),
+			)
+		}
+	}
+
+	if processedResult == nil {
+		t.Fatal("expected exactly one processed bet")
+	}
+
+	if rejectedResult == nil {
+		t.Fatal("expected exactly one rejected bet")
+	}
+
+	if processedResult.Balance != 2000 {
 		t.Fatalf(
-			"successful bets = %d, want 1",
-			successCount,
+			"processed result balance = %d, want 2000",
+			processedResult.Balance,
 		)
 	}
 
-	if failureCount != 1 {
+	if rejectedResult.Balance != 2000 {
 		t.Fatalf(
-			"failed bets = %d, want 1",
-			failureCount,
+			"rejected result balance = %d, want 2000",
+			rejectedResult.Balance,
 		)
 	}
 
-	walletEntity, err :=
-		env.walletRepository.FindByID(
-			context.Background(),
-			"wallet-two-bets",
+	if rejectedResult.Transaction.FailureCode() !=
+		domaintransaction.FailureCodeInsufficientFunds {
+		t.Fatalf(
+			"rejected failure code = %s, want %s",
+			rejectedResult.Transaction.FailureCode(),
+			domaintransaction.FailureCodeInsufficientFunds,
 		)
+	}
+
+	walletEntity, err := env.walletRepository.FindByID(
+		ctx,
+		"wallet-two-bets",
+	)
 	if err != nil {
 		t.Fatalf("find wallet: %v", err)
 	}
 
 	if walletEntity.Balance().Amount() != 2000 {
 		t.Fatalf(
-			"final balance = %d, want 2000",
+			"wallet balance = %d, want 2000",
 			walletEntity.Balance().Amount(),
 		)
 	}
 
-	if countRows(t, env, "wager_transactions") != 1 {
-		t.Fatal(
-			"expected exactly one persisted transaction",
+	if got := countRows(
+		t,
+		env,
+		"wager_transactions",
+	); got != 2 {
+		t.Fatalf(
+			"wager transaction count = %d, want 2",
+			got,
 		)
 	}
 
-	if countRows(t, env, "ledger_entries") != 1 {
+	if got := countRows(
+		t,
+		env,
+		"ledger_entries",
+	); got != 1 {
+		t.Fatalf(
+			"ledger entry count = %d, want 1",
+			got,
+		)
+	}
+
+	persistedFirst, err :=
+		env.transactionRepository.FindByID(
+			ctx,
+			firstBet.ID(),
+		)
+	if err != nil {
+		t.Fatalf("find first bet: %v", err)
+	}
+
+	persistedSecond, err :=
+		env.transactionRepository.FindByID(
+			ctx,
+			secondBet.ID(),
+		)
+	if err != nil {
+		t.Fatalf("find second bet: %v", err)
+	}
+
+	var persistedRejected *domaintransaction.WagerTransaction
+
+	switch {
+	case persistedFirst.Status() ==
+		domaintransaction.StatusProcessed &&
+		persistedSecond.Status() ==
+			domaintransaction.StatusRejected:
+
+		persistedRejected = persistedSecond
+
+	case persistedFirst.Status() ==
+		domaintransaction.StatusRejected &&
+		persistedSecond.Status() ==
+			domaintransaction.StatusProcessed:
+
+		persistedRejected = persistedFirst
+
+	default:
+		t.Fatalf(
+			"persisted statuses = %s and %s, want one PROCESSED and one REJECTED",
+			persistedFirst.Status(),
+			persistedSecond.Status(),
+		)
+	}
+
+	if persistedRejected.FailureCode() !=
+		domaintransaction.FailureCodeInsufficientFunds {
+		t.Fatalf(
+			"persisted rejected failure code = %s, want %s",
+			persistedRejected.FailureCode(),
+			domaintransaction.FailureCodeInsufficientFunds,
+		)
+	}
+
+	var replayInput *domaintransaction.WagerTransaction
+	var replayLedgerID string
+
+	if persistedRejected.ID() == firstBet.ID() {
+		replayInput = firstBet
+		replayLedgerID = "ledger-replay-bet-80-a"
+	} else {
+		replayInput = secondBet
+		replayLedgerID = "ledger-replay-bet-80-b"
+	}
+
+	replay, err := env.service.Process(
+		ctx,
+		applicationwager.ProcessInput{
+			Transaction:   replayInput,
+			LedgerEntryID: replayLedgerID,
+			OccurredAt:    time.Now().UTC(),
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"replay rejected bet: %v",
+			err,
+		)
+	}
+
+	if !replay.Replayed {
 		t.Fatal(
-			"expected exactly one persisted ledger entry",
+			"rejected transaction replay must be marked as replay",
+		)
+	}
+
+	if replay.Transaction == nil {
+		t.Fatal(
+			"replayed transaction must not be nil",
+		)
+	}
+
+	if replay.Transaction.Status() !=
+		domaintransaction.StatusRejected {
+		t.Fatalf(
+			"replay status = %s, want %s",
+			replay.Transaction.Status(),
+			domaintransaction.StatusRejected,
+		)
+	}
+
+	if replay.Transaction.FailureCode() !=
+		domaintransaction.FailureCodeInsufficientFunds {
+		t.Fatalf(
+			"replay failure code = %s, want %s",
+			replay.Transaction.FailureCode(),
+			domaintransaction.FailureCodeInsufficientFunds,
+		)
+	}
+
+	if replay.Balance != 2000 {
+		t.Fatalf(
+			"replay balance = %d, want 2000",
+			replay.Balance,
+		)
+	}
+
+	walletAfterReplay, err :=
+		env.walletRepository.FindByID(
+			ctx,
+			"wallet-two-bets",
+		)
+	if err != nil {
+		t.Fatalf(
+			"find wallet after replay: %v",
+			err,
+		)
+	}
+
+	if walletAfterReplay.Balance().Amount() != 2000 {
+		t.Fatalf(
+			"wallet balance after replay = %d, want 2000",
+			walletAfterReplay.Balance().Amount(),
+		)
+	}
+
+	if got := countRows(
+		t,
+		env,
+		"wager_transactions",
+	); got != 2 {
+		t.Fatalf(
+			"wager transaction count after replay = %d, want 2",
+			got,
+		)
+	}
+
+	if got := countRows(
+		t,
+		env,
+		"ledger_entries",
+	); got != 1 {
+		t.Fatalf(
+			"ledger entry count after replay = %d, want 1",
+			got,
 		)
 	}
 }
