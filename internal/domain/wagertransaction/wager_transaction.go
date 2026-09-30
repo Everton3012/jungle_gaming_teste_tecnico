@@ -65,6 +65,55 @@ type WagerTransaction struct {
 	updatedAt                      time.Time
 }
 
+type OpeningInput struct {
+	ID        string
+	WalletID  string
+	PlayerID  string
+	Money     money.Money
+	CreatedAt time.Time
+}
+
+func NewOpening(input OpeningInput) (WagerTransaction, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return WagerTransaction{}, ErrInvalidID
+	}
+
+	if strings.TrimSpace(input.WalletID) == "" {
+		return WagerTransaction{}, ErrInvalidWalletID
+	}
+
+	if strings.TrimSpace(input.PlayerID) == "" {
+		return WagerTransaction{}, ErrInvalidPlayerID
+	}
+
+	if input.Money.Currency() == "" {
+		return WagerTransaction{}, money.ErrInvalidCurrency
+	}
+
+	if !input.Money.IsPositive() {
+		return WagerTransaction{}, ErrInvalidOpeningAmount
+	}
+
+	if input.CreatedAt.IsZero() {
+		return WagerTransaction{}, ErrInvalidTimestamp
+	}
+
+	createdAt := input.CreatedAt.UTC()
+	resultBalance := input.Money
+
+	return WagerTransaction{
+		id:            strings.TrimSpace(input.ID),
+		walletID:      strings.TrimSpace(input.WalletID),
+		playerID:      strings.TrimSpace(input.PlayerID),
+		kind:          KindOpening,
+		money:         input.Money,
+		status:        StatusProcessed,
+		resultBalance: &resultBalance,
+		createdAt:     createdAt,
+		updatedAt:     createdAt,
+	}, nil
+}
+
 func NewExternal(input ExternalInput) (WagerTransaction, error) {
 	if err := validateExternalInput(input); err != nil {
 		return WagerTransaction{}, err

@@ -1021,3 +1021,87 @@ func rehydratedTransactionForStatus(
 
 	return transaction
 }
+func TestNewOpening(t *testing.T) {
+	amount := transactionMoney(t, "100.00")
+	createdAt := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+
+	transaction, err := NewOpening(OpeningInput{
+		ID:        "opening-1",
+		WalletID:  "wallet-1",
+		PlayerID:  "player-1",
+		Money:     amount,
+		CreatedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("NewOpening() error = %v", err)
+	}
+
+	if transaction.Kind() != KindOpening {
+		t.Fatalf("Kind() = %s", transaction.Kind())
+	}
+
+	if transaction.Status() != StatusProcessed {
+		t.Fatalf("Status() = %s", transaction.Status())
+	}
+
+	if transaction.ExternalTransactionID() != "" {
+		t.Fatalf(
+			"ExternalTransactionID() = %q",
+			transaction.ExternalTransactionID(),
+		)
+	}
+
+	if transaction.ProviderID() != "" {
+		t.Fatalf("ProviderID() = %q", transaction.ProviderID())
+	}
+
+	if transaction.IdempotencyKey() != "" {
+		t.Fatalf("IdempotencyKey() = %q", transaction.IdempotencyKey())
+	}
+
+	if transaction.PayloadHash() != "" {
+		t.Fatalf("PayloadHash() = %q", transaction.PayloadHash())
+	}
+
+	resultBalance, ok := transaction.ResultBalance()
+	if !ok {
+		t.Fatal("ResultBalance() must exist")
+	}
+
+	if !resultBalance.Equal(amount) {
+		t.Fatalf("ResultBalance() = %s", resultBalance.String())
+	}
+}
+
+func TestNewOpeningRejectsZeroAmount(t *testing.T) {
+	_, err := NewOpening(OpeningInput{
+		ID:        "opening-1",
+		WalletID:  "wallet-1",
+		PlayerID:  "player-1",
+		Money:     transactionMoney(t, "0.00"),
+		CreatedAt: time.Now(),
+	})
+
+	if !errors.Is(err, ErrInvalidOpeningAmount) {
+		t.Fatalf("NewOpening() error = %v", err)
+	}
+}
+
+func TestNewOpeningRejectsNegativeAmount(t *testing.T) {
+	amount, err := money.Rehydrate(-100, "BRL")
+	if err != nil {
+		t.Fatalf("money.Rehydrate() error = %v", err)
+	}
+
+	_, err = NewOpening(OpeningInput{
+		ID:        "opening-1",
+		WalletID:  "wallet-1",
+		PlayerID:  "player-1",
+		Money:     amount,
+		CreatedAt: time.Now(),
+	})
+
+	if !errors.Is(err, ErrInvalidOpeningAmount) {
+		t.Fatalf("NewOpening() error = %v", err)
+	}
+}

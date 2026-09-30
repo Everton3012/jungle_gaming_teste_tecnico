@@ -16,6 +16,7 @@ var (
 	ErrInvalidStatus                = errors.New("invalid transaction status")
 	ErrInvalidTimestamp             = errors.New("invalid transaction timestamp")
 	ErrInvalidFailureCode           = errors.New("invalid failure code")
+	ErrInvalidOpeningAmount         = errors.New("opening amount must be positive")
 	ErrInvalidTransition            = errors.New("invalid transaction state transition")
 	ErrTerminalTransaction          = errors.New("transaction is terminal")
 	ErrOpeningExternal              = errors.New("opening cannot be an external transaction")

@@ -314,11 +314,21 @@ func validateReference(
 	transaction *wagertransaction.WagerTransaction,
 	reference *wagertransaction.WagerTransaction,
 ) error {
-	if reference == nil {
+	switch ReferenceStatus(transaction, reference) {
+	case ReferenceMissing:
 		return ErrReferenceRequired
-	}
 
-	if reference.Status() != wagertransaction.StatusProcessed {
+	case ReferenceWaiting:
+		return ErrReferenceNotProcessed
+
+	case ReferenceRejected:
+		return ErrReferenceRejected
+
+	case ReferenceFailed:
+		return ErrReferenceFailed
+
+	case ReferenceReady:
+	default:
 		return ErrReferenceNotProcessed
 	}
 
