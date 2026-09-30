@@ -6,6 +6,7 @@ import (
 	applicationmodule "jungle_gaming_teste_tecnico/internal/application/module"
 	"jungle_gaming_teste_tecnico/internal/config"
 	"jungle_gaming_teste_tecnico/internal/infrastructure/postgres"
+	httptransport "jungle_gaming_teste_tecnico/internal/transport/http"
 )
 
 func main() {
@@ -13,5 +14,6 @@ func main() {
 		config.Module,
 		postgres.Module,
 		applicationmodule.Module,
+		httptransport.Module,
 	).Run()
 }
