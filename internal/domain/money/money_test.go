@@ -94,6 +94,25 @@ func TestNewRejectsInvalidCurrency(t *testing.T) {
 	}
 }
 
+func TestNewRejectsNegativeAmount(t *testing.T) {
+	_, err := New(-1, "BRL")
+
+	if !errors.Is(err, ErrNegativeAmount) {
+		t.Errorf("New() error = %v, want %v", err, ErrNegativeAmount)
+	}
+}
+
+func TestZero(t *testing.T) {
+	m, err := Zero("BRL")
+	if err != nil {
+		t.Fatalf("Zero() error = %v", err)
+	}
+
+	if !m.IsZero() {
+		t.Errorf("Zero() amount = %s, want 0.00", m.String())
+	}
+}
+
 func TestAdd(t *testing.T) {
 	left, _ := New(1000, "BRL")
 	right, _ := New(250, "BRL")
@@ -108,6 +127,20 @@ func TestAdd(t *testing.T) {
 	}
 }
 
+func TestAddWithNegativeMoney(t *testing.T) {
+	left, _ := New(1000, "BRL")
+	right, _ := Rehydrate(-250, "BRL")
+
+	result, err := left.Add(right)
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	if result.Amount() != 750 {
+		t.Errorf("Add() amount = %d, want 750", result.Amount())
+	}
+}
+
 func TestAddRejectsCurrencyMismatch(t *testing.T) {
 	brl, _ := New(1000, "BRL")
 	usd, _ := New(1000, "USD")
@@ -119,11 +152,22 @@ func TestAddRejectsCurrencyMismatch(t *testing.T) {
 	}
 }
 
-func TestAddRejectsOverflow(t *testing.T) {
-	max, _ := New(math.MaxInt64, "BRL")
+func TestAddRejectsPositiveOverflow(t *testing.T) {
+	max, _ := Rehydrate(math.MaxInt64, "BRL")
 	one, _ := New(1, "BRL")
 
 	_, err := max.Add(one)
+
+	if !errors.Is(err, ErrOverflow) {
+		t.Errorf("Add() error = %v, want %v", err, ErrOverflow)
+	}
+}
+
+func TestAddRejectsNegativeOverflow(t *testing.T) {
+	min, _ := Rehydrate(math.MinInt64, "BRL")
+	negativeOne, _ := Rehydrate(-1, "BRL")
+
+	_, err := min.Add(negativeOne)
 
 	if !errors.Is(err, ErrOverflow) {
 		t.Errorf("Add() error = %v, want %v", err, ErrOverflow)
@@ -144,14 +188,31 @@ func TestSub(t *testing.T) {
 	}
 }
 
-func TestSubRejectsNegativeResult(t *testing.T) {
+func TestSubAllowsNegativeInternalResult(t *testing.T) {
 	left, _ := New(500, "BRL")
 	right, _ := New(1000, "BRL")
 
-	_, err := left.Sub(right)
+	result, err := left.Sub(right)
+	if err != nil {
+		t.Fatalf("Sub() error = %v", err)
+	}
 
-	if !errors.Is(err, ErrNegativeAmount) {
-		t.Errorf("Sub() error = %v, want %v", err, ErrNegativeAmount)
+	if result.Amount() != -500 {
+		t.Errorf("Sub() amount = %d, want -500", result.Amount())
+	}
+}
+
+func TestSubNegativeMoney(t *testing.T) {
+	left, _ := New(1000, "BRL")
+	right, _ := Rehydrate(-500, "BRL")
+
+	result, err := left.Sub(right)
+	if err != nil {
+		t.Fatalf("Sub() error = %v", err)
+	}
+
+	if result.Amount() != 1500 {
+		t.Errorf("Sub() amount = %d, want 1500", result.Amount())
 	}
 }
 
@@ -163,6 +224,107 @@ func TestSubRejectsCurrencyMismatch(t *testing.T) {
 
 	if !errors.Is(err, ErrCurrencyMismatch) {
 		t.Errorf("Sub() error = %v, want %v", err, ErrCurrencyMismatch)
+	}
+}
+
+func TestSubRejectsNegativeOverflow(t *testing.T) {
+	min, _ := Rehydrate(math.MinInt64, "BRL")
+	one, _ := New(1, "BRL")
+
+	_, err := min.Sub(one)
+
+	if !errors.Is(err, ErrOverflow) {
+		t.Errorf("Sub() error = %v, want %v", err, ErrOverflow)
+	}
+}
+
+func TestSubRejectsPositiveOverflow(t *testing.T) {
+	max, _ := Rehydrate(math.MaxInt64, "BRL")
+	negativeOne, _ := Rehydrate(-1, "BRL")
+
+	_, err := max.Sub(negativeOne)
+
+	if !errors.Is(err, ErrOverflow) {
+		t.Errorf("Sub() error = %v, want %v", err, ErrOverflow)
+	}
+}
+
+func TestNegate(t *testing.T) {
+	m, _ := New(1000, "BRL")
+
+	negative, err := m.Negate()
+	if err != nil {
+		t.Fatalf("Negate() error = %v", err)
+	}
+
+	if negative.Amount() != -1000 {
+		t.Errorf("Negate() amount = %d, want -1000", negative.Amount())
+	}
+
+	positive, err := negative.Negate()
+	if err != nil {
+		t.Fatalf("Negate() error = %v", err)
+	}
+
+	if positive.Amount() != 1000 {
+		t.Errorf("Negate() amount = %d, want 1000", positive.Amount())
+	}
+}
+
+func TestNegateRejectsOverflow(t *testing.T) {
+	m, _ := Rehydrate(math.MinInt64, "BRL")
+
+	_, err := m.Negate()
+
+	if !errors.Is(err, ErrOverflow) {
+		t.Errorf("Negate() error = %v, want %v", err, ErrOverflow)
+	}
+}
+
+func TestCompare(t *testing.T) {
+	ten, _ := New(1000, "BRL")
+	twenty, _ := New(2000, "BRL")
+	anotherTen, _ := New(1000, "BRL")
+
+	result, err := ten.Compare(twenty)
+	if err != nil || result != -1 {
+		t.Errorf("Compare() = %d, %v, want -1, nil", result, err)
+	}
+
+	result, err = twenty.Compare(ten)
+	if err != nil || result != 1 {
+		t.Errorf("Compare() = %d, %v, want 1, nil", result, err)
+	}
+
+	result, err = ten.Compare(anotherTen)
+	if err != nil || result != 0 {
+		t.Errorf("Compare() = %d, %v, want 0, nil", result, err)
+	}
+}
+
+func TestCompareRejectsCurrencyMismatch(t *testing.T) {
+	brl, _ := New(1000, "BRL")
+	usd, _ := New(1000, "USD")
+
+	_, err := brl.Compare(usd)
+
+	if !errors.Is(err, ErrCurrencyMismatch) {
+		t.Errorf("Compare() error = %v, want %v", err, ErrCurrencyMismatch)
+	}
+}
+
+func TestRehydrateAllowsNegativeAmount(t *testing.T) {
+	m, err := Rehydrate(-1250, "BRL")
+	if err != nil {
+		t.Fatalf("Rehydrate() error = %v", err)
+	}
+
+	if m.Amount() != -1250 {
+		t.Errorf("Amount() = %d, want -1250", m.Amount())
+	}
+
+	if m.String() != "-12.50" {
+		t.Errorf("String() = %s, want -12.50", m.String())
 	}
 }
 
@@ -188,6 +350,7 @@ func TestParseRejectsOverflow(t *testing.T) {
 func TestPredicates(t *testing.T) {
 	zero, _ := New(0, "BRL")
 	positive, _ := New(1, "BRL")
+	negative, _ := Rehydrate(-1, "BRL")
 	equal, _ := New(1, "BRL")
 	different, _ := New(2, "BRL")
 
@@ -201,6 +364,10 @@ func TestPredicates(t *testing.T) {
 
 	if !positive.IsPositive() {
 		t.Error("positive should be positive")
+	}
+
+	if negative.IsPositive() {
+		t.Error("negative should not be positive")
 	}
 
 	if !positive.Equal(equal) {

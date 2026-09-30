@@ -19,15 +19,15 @@ func New(amount int64, currency string) (Money, error) {
 		return Money{}, ErrNegativeAmount
 	}
 
-	normalizedCurrency, err := normalizeCurrency(currency)
-	if err != nil {
-		return Money{}, err
-	}
+	return newMoney(amount, currency)
+}
 
-	return Money{
-		amount:   amount,
-		currency: normalizedCurrency,
-	}, nil
+func Rehydrate(amount int64, currency string) (Money, error) {
+	return newMoney(amount, currency)
+}
+
+func Zero(currency string) (Money, error) {
+	return New(0, currency)
 }
 
 func Parse(value, currency string) (Money, error) {
@@ -98,7 +98,11 @@ func (m Money) Add(other Money) (Money, error) {
 		return Money{}, ErrCurrencyMismatch
 	}
 
-	if other.amount > math.MaxInt64-m.amount {
+	if other.amount > 0 && m.amount > math.MaxInt64-other.amount {
+		return Money{}, ErrOverflow
+	}
+
+	if other.amount < 0 && m.amount < math.MinInt64-other.amount {
 		return Money{}, ErrOverflow
 	}
 
@@ -113,14 +117,44 @@ func (m Money) Sub(other Money) (Money, error) {
 		return Money{}, ErrCurrencyMismatch
 	}
 
-	if other.amount > m.amount {
-		return Money{}, ErrNegativeAmount
+	if other.amount > 0 && m.amount < math.MinInt64+other.amount {
+		return Money{}, ErrOverflow
+	}
+
+	if other.amount < 0 && m.amount > math.MaxInt64+other.amount {
+		return Money{}, ErrOverflow
 	}
 
 	return Money{
 		amount:   m.amount - other.amount,
 		currency: m.currency,
 	}, nil
+}
+
+func (m Money) Negate() (Money, error) {
+	if m.amount == math.MinInt64 {
+		return Money{}, ErrOverflow
+	}
+
+	return Money{
+		amount:   -m.amount,
+		currency: m.currency,
+	}, nil
+}
+
+func (m Money) Compare(other Money) (int, error) {
+	if m.currency != other.currency {
+		return 0, ErrCurrencyMismatch
+	}
+
+	switch {
+	case m.amount < other.amount:
+		return -1, nil
+	case m.amount > other.amount:
+		return 1, nil
+	default:
+		return 0, nil
+	}
 }
 
 func (m Money) IsZero() bool {
@@ -144,10 +178,26 @@ func (m Money) Currency() string {
 }
 
 func (m Money) String() string {
-	whole := m.amount / scale
-	fraction := m.amount % scale
+	if m.amount >= 0 {
+		return fmt.Sprintf("%d.%02d", m.amount/scale, m.amount%scale)
+	}
 
-	return fmt.Sprintf("%d.%02d", whole, fraction)
+	whole := -(m.amount / scale)
+	fraction := -(m.amount % scale)
+
+	return fmt.Sprintf("-%d.%02d", whole, fraction)
+}
+
+func newMoney(amount int64, currency string) (Money, error) {
+	normalizedCurrency, err := normalizeCurrency(currency)
+	if err != nil {
+		return Money{}, err
+	}
+
+	return Money{
+		amount:   amount,
+		currency: normalizedCurrency,
+	}, nil
 }
 
 func normalizeCurrency(currency string) (string, error) {
