@@ -15,7 +15,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const defaultTestDatabaseURL = "postgres://jungle:jungle@localhost:5432/jungle_gaming?sslmode=disable"
+const (
+	defaultTestDatabaseURL = "postgres://jungle:jungle@localhost:5432/jungle_gaming?sslmode=disable"
+	integrationTestLockID  = int64(8675309)
+)
 
 func testDatabaseURL() string {
 	if value := os.Getenv("TEST_DATABASE_URL"); value != "" {
@@ -45,7 +48,30 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("open postgres: %v", err)
 	}
 
+	conn, err := pool.Acquire(context.Background())
+	if err != nil {
+		pool.Close()
+		t.Fatalf("acquire postgres test lock connection: %v", err)
+	}
+
+	if _, err := conn.Exec(
+		context.Background(),
+		"SELECT pg_advisory_lock($1)",
+		integrationTestLockID,
+	); err != nil {
+		conn.Release()
+		pool.Close()
+		t.Fatalf("acquire postgres integration test lock: %v", err)
+	}
+
 	t.Cleanup(func() {
+		_, _ = conn.Exec(
+			context.Background(),
+			"SELECT pg_advisory_unlock($1)",
+			integrationTestLockID,
+		)
+
+		conn.Release()
 		pool.Close()
 	})
 
@@ -61,9 +87,11 @@ func cleanDatabase(t *testing.T, pool *pgxpool.Pool) {
 	_, err := pool.Exec(
 		ctx,
 		`
-		DELETE FROM ledger_entries;
-		DELETE FROM wager_transactions;
-		DELETE FROM wallets;
+		TRUNCATE TABLE
+			ledger_entries,
+			wager_transactions,
+			wallets
+		RESTART IDENTITY CASCADE;
 		`,
 	)
 	if err != nil {

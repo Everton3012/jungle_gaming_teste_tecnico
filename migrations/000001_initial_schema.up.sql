@@ -3,7 +3,7 @@ CREATE TABLE wallets (
     player_id TEXT NOT NULL,
     currency CHAR(3) NOT NULL,
     balance BIGINT NOT NULL,
-    version BIGINT NOT NULL,
+    version BIGINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
 
@@ -25,15 +25,17 @@ CREATE TABLE wallets (
 
 CREATE TABLE wager_transactions (
     id TEXT PRIMARY KEY,
-    external_transaction_id TEXT NOT NULL,
-    provider_id TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL,
-    payload_hash TEXT NOT NULL,
+
+    external_transaction_id TEXT,
+    provider_id TEXT,
+    idempotency_key TEXT,
+    payload_hash TEXT,
 
     wallet_id TEXT NOT NULL,
     player_id TEXT NOT NULL,
-    round_id TEXT NOT NULL,
-    game_id TEXT NOT NULL,
+
+    round_id TEXT,
+    game_id TEXT,
 
     kind TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -52,11 +54,11 @@ CREATE TABLE wager_transactions (
 
     CONSTRAINT wager_transactions_wallet_fk
         FOREIGN KEY (wallet_id)
-        REFERENCES wallets (id),
+        REFERENCES wallets(id),
 
     CONSTRAINT wager_transactions_reference_transaction_fk
         FOREIGN KEY (reference_transaction_id)
-        REFERENCES wager_transactions (id),
+        REFERENCES wager_transactions(id),
 
     CONSTRAINT wager_transactions_provider_external_unique
         UNIQUE (provider_id, external_transaction_id),
@@ -90,14 +92,14 @@ CREATE TABLE wager_transactions (
     CONSTRAINT wager_transactions_amount_non_negative
         CHECK (amount >= 0),
 
-    CONSTRAINT wager_transactions_currency_format
-        CHECK (currency ~ '^[A-Z]{3}$'),
-
     CONSTRAINT wager_transactions_result_balance_non_negative
         CHECK (
             result_balance IS NULL
             OR result_balance >= 0
         ),
+
+    CONSTRAINT wager_transactions_currency_format
+        CHECK (currency ~ '^[A-Z]{3}$'),
 
     CONSTRAINT wager_transactions_timestamps_valid
         CHECK (updated_at >= created_at),
@@ -119,8 +121,38 @@ CREATE TABLE wager_transactions (
                 status NOT IN ('REJECTED', 'FAILED')
                 AND failure_code IS NULL
             )
+        ),
+
+    CONSTRAINT wager_transactions_external_fields_valid
+        CHECK (
+            (
+                kind = 'OPENING'
+                AND external_transaction_id IS NULL
+                AND provider_id IS NULL
+                AND idempotency_key IS NULL
+                AND payload_hash IS NULL
+                AND round_id IS NULL
+                AND game_id IS NULL
+            )
+            OR
+            (
+                kind <> 'OPENING'
+                AND external_transaction_id IS NOT NULL
+                AND provider_id IS NOT NULL
+                AND idempotency_key IS NOT NULL
+                AND payload_hash IS NOT NULL
+                AND round_id IS NOT NULL
+                AND game_id IS NOT NULL
+            )
         )
 );
+
+CREATE INDEX wager_transactions_wallet_created_idx
+    ON wager_transactions (
+        wallet_id,
+        created_at,
+        id
+    );
 
 CREATE INDEX wager_transactions_reference_external_idx
     ON wager_transactions (
@@ -134,18 +166,21 @@ CREATE INDEX wager_transactions_reference_transaction_idx
     WHERE reference_transaction_id IS NOT NULL;
 
 CREATE INDEX wager_transactions_pending_reference_idx
-    ON wager_transactions (created_at, id)
+    ON wager_transactions (
+        created_at,
+        id
+    )
     WHERE status = 'PENDING_REFERENCE';
 
-CREATE INDEX wager_transactions_wallet_created_idx
-    ON wager_transactions (wallet_id, created_at, id);
 
 CREATE TABLE ledger_entries (
     id TEXT PRIMARY KEY,
+
     wallet_id TEXT NOT NULL,
     transaction_id TEXT NOT NULL,
 
     direction TEXT NOT NULL,
+
     amount BIGINT NOT NULL,
     currency CHAR(3) NOT NULL,
 
@@ -156,29 +191,31 @@ CREATE TABLE ledger_entries (
 
     CONSTRAINT ledger_entries_wallet_fk
         FOREIGN KEY (wallet_id)
-        REFERENCES wallets (id),
+        REFERENCES wallets(id),
 
     CONSTRAINT ledger_entries_transaction_fk
         FOREIGN KEY (transaction_id)
-        REFERENCES wager_transactions (id),
+        REFERENCES wager_transactions(id),
 
     CONSTRAINT ledger_entries_wallet_transaction_unique
         UNIQUE (wallet_id, transaction_id),
 
     CONSTRAINT ledger_entries_direction_valid
-        CHECK (direction IN ('CREDIT', 'DEBIT')),
+        CHECK (
+            direction IN ('CREDIT', 'DEBIT')
+        ),
 
     CONSTRAINT ledger_entries_amount_positive
         CHECK (amount > 0),
-
-    CONSTRAINT ledger_entries_currency_format
-        CHECK (currency ~ '^[A-Z]{3}$'),
 
     CONSTRAINT ledger_entries_balance_before_non_negative
         CHECK (balance_before >= 0),
 
     CONSTRAINT ledger_entries_balance_after_non_negative
         CHECK (balance_after >= 0),
+
+    CONSTRAINT ledger_entries_currency_format
+        CHECK (currency ~ '^[A-Z]{3}$'),
 
     CONSTRAINT ledger_entries_balance_equation
         CHECK (
@@ -195,7 +232,12 @@ CREATE TABLE ledger_entries (
 );
 
 CREATE INDEX ledger_entries_wallet_created_idx
-    ON ledger_entries (wallet_id, created_at, id);
+    ON ledger_entries (
+        wallet_id,
+        created_at,
+        id
+    );
+
 
 CREATE OR REPLACE FUNCTION prevent_ledger_mutation()
 RETURNS TRIGGER AS $$
