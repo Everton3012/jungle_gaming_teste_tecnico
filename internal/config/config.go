@@ -17,6 +17,10 @@ const (
 	defaultReferencePollInterval      = 2 * time.Second
 	defaultReferenceRetryBackoff      = 5 * time.Second
 	defaultReferenceBatchSize         = 100
+	defaultOutboxPollInterval         = 2 * time.Second
+	defaultOutboxRetryBackoff         = 5 * time.Second
+	defaultOutboxMaxBackoff           = 5 * time.Minute
+	defaultOutboxBatchSize            = 100
 	defaultApplicationShutdownTimeout = 10 * time.Second
 )
 
@@ -24,6 +28,7 @@ type Config struct {
 	HTTP        HTTPConfig
 	Database    DatabaseConfig
 	Reference   ReferenceConfig
+	Outbox      OutboxConfig
 	Application ApplicationConfig
 }
 
@@ -42,6 +47,13 @@ type DatabaseConfig struct {
 type ReferenceConfig struct {
 	PollInterval time.Duration
 	RetryBackoff time.Duration
+	BatchSize    int
+}
+
+type OutboxConfig struct {
+	PollInterval time.Duration
+	RetryBackoff time.Duration
+	MaxBackoff   time.Duration
 	BatchSize    int
 }
 
@@ -106,6 +118,38 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	outboxPollInterval, err := envDuration(
+		"OUTBOX_POLL_INTERVAL",
+		defaultOutboxPollInterval,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	outboxRetryBackoff, err := envDuration(
+		"OUTBOX_RETRY_BACKOFF",
+		defaultOutboxRetryBackoff,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	outboxMaxBackoff, err := envDuration(
+		"OUTBOX_MAX_BACKOFF",
+		defaultOutboxMaxBackoff,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	outboxBatchSize, err := envInt(
+		"OUTBOX_BATCH_SIZE",
+		defaultOutboxBatchSize,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
 	shutdownTimeout, err := envDuration(
 		"APPLICATION_SHUTDOWN_TIMEOUT",
 		defaultApplicationShutdownTimeout,
@@ -132,6 +176,12 @@ func Load() (Config, error) {
 			PollInterval: referencePollInterval,
 			RetryBackoff: referenceRetryBackoff,
 			BatchSize:    referenceBatchSize,
+		},
+		Outbox: OutboxConfig{
+			PollInterval: outboxPollInterval,
+			RetryBackoff: outboxRetryBackoff,
+			MaxBackoff:   outboxMaxBackoff,
+			BatchSize:    outboxBatchSize,
 		},
 		Application: ApplicationConfig{
 			ShutdownTimeout: shutdownTimeout,
@@ -198,6 +248,36 @@ func (c Config) Validate() error {
 		)
 	}
 
+	if c.Outbox.PollInterval <= 0 {
+		return errors.New(
+			"OUTBOX_POLL_INTERVAL must be greater than zero",
+		)
+	}
+
+	if c.Outbox.RetryBackoff <= 0 {
+		return errors.New(
+			"OUTBOX_RETRY_BACKOFF must be greater than zero",
+		)
+	}
+
+	if c.Outbox.MaxBackoff <= 0 {
+		return errors.New(
+			"OUTBOX_MAX_BACKOFF must be greater than zero",
+		)
+	}
+
+	if c.Outbox.MaxBackoff < c.Outbox.RetryBackoff {
+		return errors.New(
+			"OUTBOX_MAX_BACKOFF cannot be lower than OUTBOX_RETRY_BACKOFF",
+		)
+	}
+
+	if c.Outbox.BatchSize <= 0 {
+		return errors.New(
+			"OUTBOX_BATCH_SIZE must be greater than zero",
+		)
+	}
+
 	if c.Application.ShutdownTimeout <= 0 {
 		return errors.New(
 			"APPLICATION_SHUTDOWN_TIMEOUT must be greater than zero",
@@ -211,7 +291,10 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func envOrDefault(key, fallback string) string {
+func envOrDefault(
+	key string,
+	fallback string,
+) string {
 	value := os.Getenv(key)
 	if value == "" {
 		return fallback
@@ -220,7 +303,10 @@ func envOrDefault(key, fallback string) string {
 	return value
 }
 
-func envInt(key string, fallback int) (int, error) {
+func envInt(
+	key string,
+	fallback int,
+) (int, error) {
 	value := os.Getenv(key)
 	if value == "" {
 		return fallback, nil
@@ -261,10 +347,11 @@ func envDuration(
 
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"http=%s db_max=%d db_min=%d reference_batch=%d",
+		"http=%s db_max=%d db_min=%d reference_batch=%d outbox_batch=%d",
 		c.HTTP.Address,
 		c.Database.MaxConnections,
 		c.Database.MinConnections,
 		c.Reference.BatchSize,
+		c.Outbox.BatchSize,
 	)
 }
