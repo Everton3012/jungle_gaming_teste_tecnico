@@ -12,6 +12,7 @@ import (
 	appconfig "jungle_gaming_teste_tecnico/internal/config"
 	postgresinfra "jungle_gaming_teste_tecnico/internal/infrastructure/postgres"
 	ledgerpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/ledger"
+	outboxpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/outbox"
 	transactionpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wagertransaction"
 	walletpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wallet"
 
@@ -25,6 +26,7 @@ var Module = fx.Module(
 		provideWalletRepository,
 		provideWagerTransactionRepository,
 		provideLedgerRepository,
+		provideOutboxRepository,
 		provideWagerService,
 		provideWalletOpeningService,
 		provideReferenceWorker,
@@ -50,7 +52,8 @@ func provideWalletRepository(
 func provideWagerTransactionRepository(
 	pool *pgxpool.Pool,
 ) (*transactionpostgres.Repository, error) {
-	repository, err := transactionpostgres.NewRepository(pool)
+	repository, err :=
+		transactionpostgres.NewRepository(pool)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"create wager transaction repository: %w",
@@ -64,10 +67,26 @@ func provideWagerTransactionRepository(
 func provideLedgerRepository(
 	pool *pgxpool.Pool,
 ) (*ledgerpostgres.Repository, error) {
-	repository, err := ledgerpostgres.NewRepository(pool)
+	repository, err :=
+		ledgerpostgres.NewRepository(pool)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"create ledger repository: %w",
+			err,
+		)
+	}
+
+	return repository, nil
+}
+
+func provideOutboxRepository(
+	pool *pgxpool.Pool,
+) (*outboxpostgres.Repository, error) {
+	repository, err :=
+		outboxpostgres.NewRepository(pool)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create outbox repository: %w",
 			err,
 		)
 	}
@@ -80,16 +99,44 @@ func provideWagerService(
 	walletRepository *walletpostgres.Repository,
 	transactionRepository *transactionpostgres.Repository,
 	ledgerRepository *ledgerpostgres.Repository,
+	outboxRepository *outboxpostgres.Repository,
 ) (*applicationwager.Service, error) {
-	service, err := applicationwager.NewService(
-		transactionManager,
-		walletRepository,
-		transactionRepository,
-		ledgerRepository,
-	)
+	service, err :=
+		applicationwager.NewService(
+			transactionManager,
+			walletRepository,
+			transactionRepository,
+			ledgerRepository,
+			outboxRepository,
+		)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"create wager service: %w",
+			err,
+		)
+	}
+
+	return service, nil
+}
+
+func provideWalletOpeningService(
+	transactionManager *postgresinfra.TransactionManager,
+	walletRepository *walletpostgres.Repository,
+	transactionRepository *transactionpostgres.Repository,
+	ledgerRepository *ledgerpostgres.Repository,
+	outboxRepository *outboxpostgres.Repository,
+) (*applicationwalletopening.Service, error) {
+	service, err :=
+		applicationwalletopening.NewService(
+			transactionManager,
+			walletRepository,
+			transactionRepository,
+			ledgerRepository,
+			outboxRepository,
+		)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create wallet opening service: %w",
 			err,
 		)
 	}
@@ -102,15 +149,16 @@ func provideReferenceWorker(
 	wagerService *applicationwager.Service,
 	cfg appconfig.Config,
 ) (*applicationreference.Worker, error) {
-	worker, err := applicationreference.NewWorker(
-		transactionRepository,
-		wagerService,
-		applicationreference.Config{
-			BatchSize:    cfg.Reference.BatchSize,
-			PollInterval: cfg.Reference.PollInterval,
-			RetryBackoff: cfg.Reference.RetryBackoff,
-		},
-	)
+	worker, err :=
+		applicationreference.NewWorker(
+			transactionRepository,
+			wagerService,
+			applicationreference.Config{
+				BatchSize:    cfg.Reference.BatchSize,
+				PollInterval: cfg.Reference.PollInterval,
+				RetryBackoff: cfg.Reference.RetryBackoff,
+			},
+		)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"create reference worker: %w",
@@ -119,29 +167,6 @@ func provideReferenceWorker(
 	}
 
 	return worker, nil
-}
-
-func provideWalletOpeningService(
-	transactionManager *postgresinfra.TransactionManager,
-	walletRepository *walletpostgres.Repository,
-	transactionRepository *transactionpostgres.Repository,
-	ledgerRepository *ledgerpostgres.Repository,
-) (*applicationwalletopening.Service, error) {
-	service, err :=
-		applicationwalletopening.NewService(
-			transactionManager,
-			walletRepository,
-			transactionRepository,
-			ledgerRepository,
-		)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"create wallet opening service: %w",
-			err,
-		)
-	}
-
-	return service, nil
 }
 
 func runReferenceWorker(
@@ -155,21 +180,29 @@ func runReferenceWorker(
 
 	lifecycle.Append(
 		fx.Hook{
-			OnStart: func(context.Context) error {
+			OnStart: func(
+				context.Context,
+			) error {
 				workerContext, workerCancel :=
-					context.WithCancel(context.Background())
+					context.WithCancel(
+						context.Background(),
+					)
 
 				cancel = workerCancel
 				done = make(chan error, 1)
 
 				go func() {
-					done <- worker.Run(workerContext)
+					done <- worker.Run(
+						workerContext,
+					)
 				}()
 
 				return nil
 			},
 
-			OnStop: func(ctx context.Context) error {
+			OnStop: func(
+				ctx context.Context,
+			) error {
 				if cancel == nil {
 					return nil
 				}

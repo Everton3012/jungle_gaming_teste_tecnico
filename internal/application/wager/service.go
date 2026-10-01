@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"time"
 
+	domainledger "jungle_gaming_teste_tecnico/internal/domain/ledger"
 	domainwager "jungle_gaming_teste_tecnico/internal/domain/wager"
 	domaintransaction "jungle_gaming_teste_tecnico/internal/domain/wagertransaction"
 	domainwallet "jungle_gaming_teste_tecnico/internal/domain/wallet"
 	postgresinfra "jungle_gaming_teste_tecnico/internal/infrastructure/postgres"
 	ledgerpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/ledger"
+	outboxpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/outbox"
 	transactionpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wagertransaction"
 	walletpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wallet"
 
@@ -36,6 +38,7 @@ type Service struct {
 	walletRepository      *walletpostgres.Repository
 	transactionRepository *transactionpostgres.Repository
 	ledgerRepository      *ledgerpostgres.Repository
+	outboxRepository      *outboxpostgres.Repository
 	processor             domainwager.Processor
 	maxRetries            int
 }
@@ -44,6 +47,8 @@ type ProcessInput struct {
 	Transaction   *domaintransaction.WagerTransaction
 	Reference     *domaintransaction.WagerTransaction
 	LedgerEntryID string
+	CorrelationID string
+	CausationID   string
 	OccurredAt    time.Time
 }
 
@@ -59,11 +64,13 @@ func NewService(
 	walletRepository *walletpostgres.Repository,
 	transactionRepository *transactionpostgres.Repository,
 	ledgerRepository *ledgerpostgres.Repository,
+	outboxRepository *outboxpostgres.Repository,
 ) (*Service, error) {
 	if transactionManager == nil ||
 		walletRepository == nil ||
 		transactionRepository == nil ||
-		ledgerRepository == nil {
+		ledgerRepository == nil ||
+		outboxRepository == nil {
 		return nil, ErrServiceRequired
 	}
 
@@ -72,6 +79,7 @@ func NewService(
 		walletRepository:      walletRepository,
 		transactionRepository: transactionRepository,
 		ledgerRepository:      ledgerRepository,
+		outboxRepository:      outboxRepository,
 		processor:             domainwager.NewProcessor(),
 		maxRetries:            defaultMaxRetries,
 	}, nil
@@ -155,6 +163,12 @@ func (s *Service) processAttempt(
 
 			txLedgerRepository, err :=
 				s.ledgerRepository.WithDB(tx)
+			if err != nil {
+				return err
+			}
+
+			txOutboxRepository, err :=
+				s.outboxRepository.WithDB(tx)
 			if err != nil {
 				return err
 			}
@@ -290,9 +304,14 @@ func (s *Service) processAttempt(
 					return persistPendingReference(
 						ctx,
 						txTransactionRepository,
+						txOutboxRepository,
 						walletEntity,
 						&transactionCopy,
 						input.OccurredAt,
+						eventMetadata{
+							CorrelationID: input.CorrelationID,
+							CausationID:   input.CausationID,
+						},
 						&result,
 					)
 				}
@@ -304,9 +323,14 @@ func (s *Service) processAttempt(
 					return persistInsufficientFundsRejection(
 						ctx,
 						txTransactionRepository,
+						txOutboxRepository,
 						walletEntity,
 						&transactionCopy,
 						input.OccurredAt,
+						eventMetadata{
+							CorrelationID: input.CorrelationID,
+							CausationID:   input.CausationID,
+						},
 						&result,
 					)
 				}
@@ -338,6 +362,26 @@ func (s *Service) processAttempt(
 				); err != nil {
 					return err
 				}
+			}
+
+			var ledgerEntry *domainledger.Entry
+			if hasLedger {
+				ledgerEntry = &entry
+			}
+
+			if err := persistProcessedEvents(
+				ctx,
+				txOutboxRepository,
+				&transactionCopy,
+				ledgerEntry,
+				walletEntity.Version(),
+				input.OccurredAt,
+				eventMetadata{
+					CorrelationID: input.CorrelationID,
+					CausationID:   input.CausationID,
+				},
+			); err != nil {
+				return err
 			}
 
 			result = ProcessResult{
@@ -388,10 +432,6 @@ func resolveProcessReference(
 		return nil, nil
 	}
 
-	/*
-		Permite referência explicitamente fornecida por chamadas
-		internas/testes, mas o caso de uso não depende dela.
-	*/
 	if providedReference != nil {
 		value := *providedReference
 		return &value, nil
@@ -415,13 +455,6 @@ func resolveProcessReference(
 		err,
 		transactionpostgres.ErrNotFound,
 	) {
-		/*
-			Referência ainda não chegou.
-
-			Retornar nil é proposital:
-			o Processor produzirá ErrReferenceRequired
-			e o fluxo existente persistirá PENDING_REFERENCE.
-		*/
 		return nil, nil
 	}
 
@@ -437,9 +470,11 @@ func resolveProcessReference(
 func persistPendingReference(
 	ctx context.Context,
 	transactionRepository *transactionpostgres.Repository,
+	outboxRepository *outboxpostgres.Repository,
 	walletEntity *domainwallet.Wallet,
 	transaction *domaintransaction.WagerTransaction,
 	occurredAt time.Time,
+	metadata eventMetadata,
 	result *ProcessResult,
 ) error {
 	if err := transaction.MarkPendingReference(
@@ -451,6 +486,16 @@ func persistPendingReference(
 	if err := transactionRepository.Create(
 		ctx,
 		transaction,
+	); err != nil {
+		return err
+	}
+
+	if err := persistPendingReferenceEvent(
+		ctx,
+		outboxRepository,
+		transaction,
+		occurredAt,
+		metadata,
 	); err != nil {
 		return err
 	}
@@ -468,9 +513,11 @@ func persistPendingReference(
 func persistInsufficientFundsRejection(
 	ctx context.Context,
 	transactionRepository *transactionpostgres.Repository,
+	outboxRepository *outboxpostgres.Repository,
 	walletEntity *domainwallet.Wallet,
 	transaction *domaintransaction.WagerTransaction,
 	occurredAt time.Time,
+	metadata eventMetadata,
 	result *ProcessResult,
 ) error {
 	if err := transaction.MarkRejected(
@@ -484,6 +531,16 @@ func persistInsufficientFundsRejection(
 	if err := transactionRepository.Create(
 		ctx,
 		transaction,
+	); err != nil {
+		return err
+	}
+
+	if err := persistRejectedEvent(
+		ctx,
+		outboxRepository,
+		transaction,
+		occurredAt,
+		metadata,
 	); err != nil {
 		return err
 	}
@@ -523,6 +580,12 @@ func (s *Service) resumePendingReferenceAttempt(
 
 			txLedgerRepository, err :=
 				s.ledgerRepository.WithDB(tx)
+			if err != nil {
+				return err
+			}
+
+			txOutboxRepository, err :=
+				s.outboxRepository.WithDB(tx)
 			if err != nil {
 				return err
 			}
@@ -631,6 +694,25 @@ func (s *Service) resumePendingReferenceAttempt(
 				); err != nil {
 					return err
 				}
+			}
+
+			var ledgerEntry *domainledger.Entry
+			if hasLedger {
+				ledgerEntry = &entry
+			}
+
+			if err := persistProcessedEvents(
+				ctx,
+				txOutboxRepository,
+				&pendingCopy,
+				ledgerEntry,
+				walletEntity.Version(),
+				occurredAt,
+				eventMetadata{
+					CorrelationID: pendingCopy.ID(),
+				},
+			); err != nil {
+				return err
 			}
 
 			result = ProcessResult{

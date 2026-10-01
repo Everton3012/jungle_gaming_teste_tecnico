@@ -15,6 +15,7 @@ import (
 	domainwallet "jungle_gaming_teste_tecnico/internal/domain/wallet"
 	postgresinfra "jungle_gaming_teste_tecnico/internal/infrastructure/postgres"
 	ledgerpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/ledger"
+	outboxpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/outbox"
 	transactionpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wagertransaction"
 	walletpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wallet"
 
@@ -32,6 +33,7 @@ type testEnvironment struct {
 	walletRepository      *walletpostgres.Repository
 	transactionRepository *transactionpostgres.Repository
 	ledgerRepository      *ledgerpostgres.Repository
+	outboxRepository      *outboxpostgres.Repository
 }
 
 func testDatabaseURL() string {
@@ -96,6 +98,7 @@ func newTestEnvironment(t *testing.T) *testEnvironment {
 		context.Background(),
 		`
 		TRUNCATE TABLE
+			outbox_events,
 			ledger_entries,
 			wager_transactions,
 			wallets
@@ -124,6 +127,12 @@ func newTestEnvironment(t *testing.T) *testEnvironment {
 		t.Fatalf("create ledger repository: %v", err)
 	}
 
+	outboxRepository, err :=
+		outboxpostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatalf("create outbox repository: %v", err)
+	}
+
 	transactionManager, err :=
 		postgresinfra.NewTransactionManager(pool)
 	if err != nil {
@@ -135,6 +144,7 @@ func newTestEnvironment(t *testing.T) *testEnvironment {
 		walletRepository,
 		transactionRepository,
 		ledgerRepository,
+		outboxRepository,
 	)
 	if err != nil {
 		t.Fatalf("create wager service: %v", err)
@@ -146,6 +156,7 @@ func newTestEnvironment(t *testing.T) *testEnvironment {
 		walletRepository:      walletRepository,
 		transactionRepository: transactionRepository,
 		ledgerRepository:      ledgerRepository,
+		outboxRepository:      outboxRepository,
 	}
 }
 

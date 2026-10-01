@@ -14,6 +14,7 @@ import (
 	domainwallet "jungle_gaming_teste_tecnico/internal/domain/wallet"
 	postgresinfra "jungle_gaming_teste_tecnico/internal/infrastructure/postgres"
 	ledgerpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/ledger"
+	outboxpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/outbox"
 	transactionpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wagertransaction"
 	walletpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wallet"
 )
@@ -23,6 +24,7 @@ var (
 	ErrWalletRepositoryRequired      = errors.New("wallet repository is required")
 	ErrTransactionRepositoryRequired = errors.New("transaction repository is required")
 	ErrLedgerRepositoryRequired      = errors.New("ledger repository is required")
+	ErrOutboxRepositoryRequired      = errors.New("outbox repository is required")
 	ErrWalletAlreadyExists           = errors.New("wallet already exists")
 )
 
@@ -31,6 +33,7 @@ type Service struct {
 	walletRepository      *walletpostgres.Repository
 	transactionRepository *transactionpostgres.Repository
 	ledgerRepository      *ledgerpostgres.Repository
+	outboxRepository      *outboxpostgres.Repository
 }
 
 type CreateInput struct {
@@ -51,6 +54,7 @@ func NewService(
 	walletRepository *walletpostgres.Repository,
 	transactionRepository *transactionpostgres.Repository,
 	ledgerRepository *ledgerpostgres.Repository,
+	outboxRepository *outboxpostgres.Repository,
 ) (*Service, error) {
 	if transactionManager == nil {
 		return nil, ErrTransactionManagerRequired
@@ -68,11 +72,16 @@ func NewService(
 		return nil, ErrLedgerRepositoryRequired
 	}
 
+	if outboxRepository == nil {
+		return nil, ErrOutboxRepositoryRequired
+	}
+
 	return &Service{
 		transactionManager:    transactionManager,
 		walletRepository:      walletRepository,
 		transactionRepository: transactionRepository,
 		ledgerRepository:      ledgerRepository,
+		outboxRepository:      outboxRepository,
 	}, nil
 }
 
@@ -88,7 +97,10 @@ func (s *Service) Create(
 
 	err := s.transactionManager.WithinTransaction(
 		ctx,
-		func(ctx context.Context, tx pgx.Tx) error {
+		func(
+			ctx context.Context,
+			tx pgx.Tx,
+		) error {
 			txWalletRepository, err :=
 				s.walletRepository.WithDB(tx)
 			if err != nil {
@@ -116,6 +128,15 @@ func (s *Service) Create(
 				)
 			}
 
+			txOutboxRepository, err :=
+				s.outboxRepository.WithDB(tx)
+			if err != nil {
+				return fmt.Errorf(
+					"create transactional outbox repository: %w",
+					err,
+				)
+			}
+
 			existing, err :=
 				txWalletRepository.FindByPlayerCurrency(
 					ctx,
@@ -128,7 +149,10 @@ func (s *Service) Create(
 				return ErrWalletAlreadyExists
 
 			case err != nil &&
-				!errors.Is(err, walletpostgres.ErrNotFound):
+				!errors.Is(
+					err,
+					walletpostgres.ErrNotFound,
+				):
 				return fmt.Errorf(
 					"check existing wallet: %w",
 					err,
@@ -158,7 +182,6 @@ func (s *Service) Create(
 					ctx,
 					&openingResult.Wallet,
 				); err != nil {
-
 				return fmt.Errorf(
 					"persist wallet: %w",
 					err,
@@ -171,7 +194,6 @@ func (s *Service) Create(
 						ctx,
 						openingResult.Transaction,
 					); err != nil {
-
 					return fmt.Errorf(
 						"persist opening transaction: %w",
 						err,
@@ -185,9 +207,26 @@ func (s *Service) Create(
 						ctx,
 						openingResult.LedgerEntry,
 					); err != nil {
-
 					return fmt.Errorf(
 						"persist opening ledger entry: %w",
+						err,
+					)
+				}
+			}
+
+			if openingResult.Transaction != nil &&
+				openingResult.LedgerEntry != nil {
+
+				if err := persistOpeningEvents(
+					ctx,
+					txOutboxRepository,
+					&openingResult.Wallet,
+					openingResult.Transaction,
+					openingResult.LedgerEntry,
+					input.CreatedAt,
+				); err != nil {
+					return fmt.Errorf(
+						"persist opening events: %w",
 						err,
 					)
 				}
