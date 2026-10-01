@@ -29,6 +29,11 @@ const (
 	defaultAWSAccessKeyID     = "test"
 	defaultAWSSecretAccessKey = "test"
 	defaultSQSOutboxQueueName = "wager-events.fifo"
+
+	defaultSQSConsumerQueueName         = "wager-transactions.fifo"
+	defaultSQSConsumerMaxMessages       = 10
+	defaultSQSConsumerWaitTime          = 20 * time.Second
+	defaultSQSConsumerVisibilityTimeout = 30 * time.Second
 )
 
 type Config struct {
@@ -70,7 +75,13 @@ type SQSConfig struct {
 	EndpointURL     string
 	AccessKeyID     string
 	SecretAccessKey string
+
 	OutboxQueueName string
+
+	ConsumerQueueName         string
+	ConsumerMaxMessages       int32
+	ConsumerWaitTime          time.Duration
+	ConsumerVisibilityTimeout time.Duration
 }
 
 type ApplicationConfig struct {
@@ -166,6 +177,30 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	consumerMaxMessages, err := envInt(
+		"SQS_CONSUMER_MAX_MESSAGES",
+		defaultSQSConsumerMaxMessages,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	consumerWaitTime, err := envDuration(
+		"SQS_CONSUMER_WAIT_TIME",
+		defaultSQSConsumerWaitTime,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	consumerVisibilityTimeout, err := envDuration(
+		"SQS_CONSUMER_VISIBILITY_TIMEOUT",
+		defaultSQSConsumerVisibilityTimeout,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
 	shutdownTimeout, err := envDuration(
 		"APPLICATION_SHUTDOWN_TIMEOUT",
 		defaultApplicationShutdownTimeout,
@@ -181,46 +216,68 @@ func Load() (Config, error) {
 				defaultHTTPAddress,
 			),
 		},
+
 		Database: DatabaseConfig{
-			URL:              strings.TrimSpace(os.Getenv("DATABASE_URL")),
+			URL: strings.TrimSpace(
+				os.Getenv("DATABASE_URL"),
+			),
 			MaxConnections:   int32(maxConnections),
 			MinConnections:   int32(minConnections),
 			ConnectTimeout:   connectTimeout,
 			OperationTimeout: operationTimeout,
 		},
+
 		Reference: ReferenceConfig{
 			PollInterval: referencePollInterval,
 			RetryBackoff: referenceRetryBackoff,
 			BatchSize:    referenceBatchSize,
 		},
+
 		Outbox: OutboxConfig{
 			PollInterval: outboxPollInterval,
 			RetryBackoff: outboxRetryBackoff,
 			MaxBackoff:   outboxMaxBackoff,
 			BatchSize:    outboxBatchSize,
 		},
+
 		SQS: SQSConfig{
 			Region: envOrDefault(
 				"AWS_REGION",
 				defaultAWSRegion,
 			),
+
 			EndpointURL: envOrDefault(
 				"AWS_ENDPOINT_URL",
 				defaultAWSEndpointURL,
 			),
+
 			AccessKeyID: envOrDefault(
 				"AWS_ACCESS_KEY_ID",
 				defaultAWSAccessKeyID,
 			),
+
 			SecretAccessKey: envOrDefault(
 				"AWS_SECRET_ACCESS_KEY",
 				defaultAWSSecretAccessKey,
 			),
+
 			OutboxQueueName: envOrDefault(
 				"SQS_OUTBOX_QUEUE_NAME",
 				defaultSQSOutboxQueueName,
 			),
+
+			ConsumerQueueName: envOrDefault(
+				"SQS_CONSUMER_QUEUE_NAME",
+				defaultSQSConsumerQueueName,
+			),
+
+			ConsumerMaxMessages: int32(consumerMaxMessages),
+
+			ConsumerWaitTime: consumerWaitTime,
+
+			ConsumerVisibilityTimeout: consumerVisibilityTimeout,
 		},
+
 		Application: ApplicationConfig{
 			ShutdownTimeout: shutdownTimeout,
 		},
@@ -235,7 +292,9 @@ func Load() (Config, error) {
 
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.Database.URL) == "" {
-		return errors.New("DATABASE_URL is required")
+		return errors.New(
+			"DATABASE_URL is required",
+		)
 	}
 
 	if c.Database.MaxConnections <= 0 {
@@ -250,7 +309,8 @@ func (c Config) Validate() error {
 		)
 	}
 
-	if c.Database.MinConnections > c.Database.MaxConnections {
+	if c.Database.MinConnections >
+		c.Database.MaxConnections {
 		return errors.New(
 			"DATABASE_MIN_CONNECTIONS cannot exceed DATABASE_MAX_CONNECTIONS",
 		)
@@ -286,19 +346,22 @@ func (c Config) Validate() error {
 		)
 	}
 
-	if c.Outbox.PollInterval != 0 && c.Outbox.PollInterval <= 0 {
+	if c.Outbox.PollInterval != 0 &&
+		c.Outbox.PollInterval <= 0 {
 		return errors.New(
 			"OUTBOX_POLL_INTERVAL must be greater than zero",
 		)
 	}
 
-	if c.Outbox.RetryBackoff != 0 && c.Outbox.RetryBackoff <= 0 {
+	if c.Outbox.RetryBackoff != 0 &&
+		c.Outbox.RetryBackoff <= 0 {
 		return errors.New(
 			"OUTBOX_RETRY_BACKOFF must be greater than zero",
 		)
 	}
 
-	if c.Outbox.MaxBackoff != 0 && c.Outbox.MaxBackoff <= 0 {
+	if c.Outbox.MaxBackoff != 0 &&
+		c.Outbox.MaxBackoff <= 0 {
 		return errors.New(
 			"OUTBOX_MAX_BACKOFF must be greater than zero",
 		)
@@ -306,7 +369,8 @@ func (c Config) Validate() error {
 
 	if c.Outbox.RetryBackoff != 0 &&
 		c.Outbox.MaxBackoff != 0 &&
-		c.Outbox.MaxBackoff < c.Outbox.RetryBackoff {
+		c.Outbox.MaxBackoff <
+			c.Outbox.RetryBackoff {
 		return errors.New(
 			"OUTBOX_MAX_BACKOFF cannot be lower than OUTBOX_RETRY_BACKOFF",
 		)
@@ -319,30 +383,80 @@ func (c Config) Validate() error {
 	}
 
 	if strings.TrimSpace(c.SQS.Region) != "" {
-		if strings.TrimSpace(c.SQS.AccessKeyID) == "" {
+		if strings.TrimSpace(
+			c.SQS.AccessKeyID,
+		) == "" {
 			return errors.New(
 				"AWS_ACCESS_KEY_ID is required when SQS is configured",
 			)
 		}
 
-		if strings.TrimSpace(c.SQS.SecretAccessKey) == "" {
+		if strings.TrimSpace(
+			c.SQS.SecretAccessKey,
+		) == "" {
 			return errors.New(
 				"AWS_SECRET_ACCESS_KEY is required when SQS is configured",
 			)
 		}
 
-		if strings.TrimSpace(c.SQS.OutboxQueueName) == "" {
+		if strings.TrimSpace(
+			c.SQS.OutboxQueueName,
+		) == "" {
 			return errors.New(
 				"SQS_OUTBOX_QUEUE_NAME is required when SQS is configured",
 			)
 		}
 
 		if !strings.HasSuffix(
-			strings.TrimSpace(c.SQS.OutboxQueueName),
+			strings.TrimSpace(
+				c.SQS.OutboxQueueName,
+			),
 			".fifo",
 		) {
 			return errors.New(
 				"SQS_OUTBOX_QUEUE_NAME must reference a FIFO queue",
+			)
+		}
+
+		if strings.TrimSpace(
+			c.SQS.ConsumerQueueName,
+		) == "" {
+			return errors.New(
+				"SQS_CONSUMER_QUEUE_NAME is required when SQS is configured",
+			)
+		}
+
+		if !strings.HasSuffix(
+			strings.TrimSpace(
+				c.SQS.ConsumerQueueName,
+			),
+			".fifo",
+		) {
+			return errors.New(
+				"SQS_CONSUMER_QUEUE_NAME must reference a FIFO queue",
+			)
+		}
+
+		if c.SQS.ConsumerMaxMessages <= 0 ||
+			c.SQS.ConsumerMaxMessages > 10 {
+			return errors.New(
+				"SQS_CONSUMER_MAX_MESSAGES must be between 1 and 10",
+			)
+		}
+
+		if c.SQS.ConsumerWaitTime < 0 ||
+			c.SQS.ConsumerWaitTime >
+				20*time.Second {
+			return errors.New(
+				"SQS_CONSUMER_WAIT_TIME must be between 0 and 20 seconds",
+			)
+		}
+
+		if c.SQS.ConsumerVisibilityTimeout <= 0 ||
+			c.SQS.ConsumerVisibilityTimeout >
+				12*time.Hour {
+			return errors.New(
+				"SQS_CONSUMER_VISIBILITY_TIMEOUT must be between 1 second and 12 hours",
 			)
 		}
 	}
@@ -354,7 +468,9 @@ func (c Config) Validate() error {
 	}
 
 	if strings.TrimSpace(c.HTTP.Address) == "" {
-		return errors.New("HTTP_ADDRESS is required")
+		return errors.New(
+			"HTTP_ADDRESS is required",
+		)
 	}
 
 	return nil
@@ -364,7 +480,10 @@ func envOrDefault(
 	key string,
 	fallback string,
 ) string {
-	value := strings.TrimSpace(os.Getenv(key))
+	value := strings.TrimSpace(
+		os.Getenv(key),
+	)
+
 	if value == "" {
 		return fallback
 	}
@@ -376,7 +495,10 @@ func envInt(
 	key string,
 	fallback int,
 ) (int, error) {
-	value := strings.TrimSpace(os.Getenv(key))
+	value := strings.TrimSpace(
+		os.Getenv(key),
+	)
+
 	if value == "" {
 		return fallback, nil
 	}
@@ -397,12 +519,17 @@ func envDuration(
 	key string,
 	fallback time.Duration,
 ) (time.Duration, error) {
-	value := strings.TrimSpace(os.Getenv(key))
+	value := strings.TrimSpace(
+		os.Getenv(key),
+	)
+
 	if value == "" {
 		return fallback, nil
 	}
 
-	parsed, err := time.ParseDuration(value)
+	parsed, err :=
+		time.ParseDuration(value)
+
 	if err != nil {
 		return 0, fmt.Errorf(
 			"%s must be a valid duration: %w",
@@ -416,7 +543,7 @@ func envDuration(
 
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"http=%s db_max=%d db_min=%d reference_batch=%d outbox_batch=%d sqs_region=%s sqs_queue=%s",
+		"http=%s db_max=%d db_min=%d reference_batch=%d outbox_batch=%d sqs_region=%s sqs_outbox_queue=%s sqs_consumer_queue=%s",
 		c.HTTP.Address,
 		c.Database.MaxConnections,
 		c.Database.MinConnections,
@@ -424,5 +551,6 @@ func (c Config) String() string {
 		c.Outbox.BatchSize,
 		c.SQS.Region,
 		c.SQS.OutboxQueueName,
+		c.SQS.ConsumerQueueName,
 	)
 }
