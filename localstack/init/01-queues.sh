@@ -3,17 +3,10 @@ set -eu
 
 echo "Creating Jungle Gaming SQS queues..."
 
-cat > /tmp/dlq-attributes.json <<'EOF'
-{
-  "FifoQueue": "true",
-  "ContentBasedDeduplication": "false"
-}
-EOF
-
 DLQ_URL="$(
     awslocal sqs create-queue \
         --queue-name wager-transactions-dlq.fifo \
-        --attributes file:///tmp/dlq-attributes.json \
+        --attributes FifoQueue=true,ContentBasedDeduplication=false \
         --query QueueUrl \
         --output text
 )"
@@ -26,28 +19,30 @@ DLQ_ARN="$(
         --output text
 )"
 
-cat > /tmp/transactions-attributes.json <<EOF
+TRANSACTIONS_QUEUE_URL="$(
+    awslocal sqs create-queue \
+        --queue-name wager-transactions.fifo \
+        --attributes FifoQueue=true,ContentBasedDeduplication=false,VisibilityTimeout=30 \
+        --query QueueUrl \
+        --output text
+)"
+
+cat > /tmp/redrive-policy.json <<EOF
 {
-  "FifoQueue": "true",
-  "ContentBasedDeduplication": "false",
-  "VisibilityTimeout": "30",
-  "RedrivePolicy": "{\"deadLetterTargetArn\":\"${DLQ_ARN}\",\"maxReceiveCount\":\"5\"}"
+  "RedrivePolicy": "{\"deadLetterTargetArn\":\"$DLQ_ARN\",\"maxReceiveCount\":\"5\"}"
 }
 EOF
 
-awslocal sqs create-queue \
-    --queue-name wager-transactions.fifo \
-    --attributes file:///tmp/transactions-attributes.json
-
-cat > /tmp/events-attributes.json <<'EOF'
-{
-  "FifoQueue": "true",
-  "ContentBasedDeduplication": "false"
-}
-EOF
+awslocal sqs set-queue-attributes \
+    --queue-url "$TRANSACTIONS_QUEUE_URL" \
+    --attributes file:///tmp/redrive-policy.json
 
 awslocal sqs create-queue \
     --queue-name wager-events.fifo \
-    --attributes file:///tmp/events-attributes.json
+    --attributes FifoQueue=true,ContentBasedDeduplication=false
+
+awslocal sqs create-queue \
+    --queue-name outbox-publisher-integration.fifo \
+    --attributes FifoQueue=true,ContentBasedDeduplication=false
 
 echo "Jungle Gaming SQS queues created."

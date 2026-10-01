@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	applicationoutbox "jungle_gaming_teste_tecnico/internal/application/outboxpublisher"
 	applicationreference "jungle_gaming_teste_tecnico/internal/application/reference"
 	applicationwager "jungle_gaming_teste_tecnico/internal/application/wager"
 	applicationwalletopening "jungle_gaming_teste_tecnico/internal/application/walletopening"
@@ -15,8 +17,7 @@ import (
 	outboxpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/outbox"
 	transactionpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wagertransaction"
 	walletpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wallet"
-
-	"github.com/jackc/pgx/v5/pgxpool"
+	sqsinfra "jungle_gaming_teste_tecnico/internal/infrastructure/sqs"
 )
 
 var Module = fx.Module(
@@ -27,12 +28,21 @@ var Module = fx.Module(
 		provideWagerTransactionRepository,
 		provideLedgerRepository,
 		provideOutboxRepository,
+
 		provideWagerService,
 		provideWalletOpeningService,
+
 		provideReferenceWorker,
+
+		provideSQSClient,
+		provideSQSDestination,
+		provideOutboxPublisher,
 	),
 
-	fx.Invoke(runReferenceWorker),
+	fx.Invoke(
+		runReferenceWorker,
+		runOutboxPublisher,
+	),
 )
 
 func provideWalletRepository(
@@ -169,6 +179,73 @@ func provideReferenceWorker(
 	return worker, nil
 }
 
+func provideSQSClient(
+	cfg appconfig.Config,
+) (*sqsinfra.Client, error) {
+	client, err := sqsinfra.NewClient(
+		context.Background(),
+		sqsinfra.Config{
+			Region:          cfg.SQS.Region,
+			EndpointURL:     cfg.SQS.EndpointURL,
+			AccessKeyID:     cfg.SQS.AccessKeyID,
+			SecretAccessKey: cfg.SQS.SecretAccessKey,
+			QueueName:       cfg.SQS.OutboxQueueName,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create SQS client: %w",
+			err,
+		)
+	}
+
+	return client, nil
+}
+
+func provideSQSDestination(
+	client *sqsinfra.Client,
+	cfg appconfig.Config,
+) (*sqsinfra.Destination, error) {
+	destination, err := sqsinfra.NewDestination(
+		context.Background(),
+		client,
+		cfg.SQS.OutboxQueueName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create SQS outbox destination: %w",
+			err,
+		)
+	}
+
+	return destination, nil
+}
+
+func provideOutboxPublisher(
+	repository *outboxpostgres.Repository,
+	destination *sqsinfra.Destination,
+	cfg appconfig.Config,
+) (*applicationoutbox.Publisher, error) {
+	publisher, err := applicationoutbox.NewPublisher(
+		repository,
+		destination,
+		applicationoutbox.Config{
+			BatchSize:    cfg.Outbox.BatchSize,
+			PollInterval: cfg.Outbox.PollInterval,
+			RetryBackoff: cfg.Outbox.RetryBackoff,
+			MaxBackoff:   cfg.Outbox.MaxBackoff,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create outbox publisher: %w",
+			err,
+		)
+	}
+
+	return publisher, nil
+}
+
 func runReferenceWorker(
 	lifecycle fx.Lifecycle,
 	worker *applicationreference.Worker,
@@ -223,6 +300,68 @@ func runReferenceWorker(
 				case <-ctx.Done():
 					return fmt.Errorf(
 						"wait reference worker shutdown: %w",
+						ctx.Err(),
+					)
+				}
+			},
+		},
+	)
+}
+
+func runOutboxPublisher(
+	lifecycle fx.Lifecycle,
+	publisher *applicationoutbox.Publisher,
+) {
+	var (
+		cancel context.CancelFunc
+		done   chan error
+	)
+
+	lifecycle.Append(
+		fx.Hook{
+			OnStart: func(
+				context.Context,
+			) error {
+				publisherContext, publisherCancel :=
+					context.WithCancel(
+						context.Background(),
+					)
+
+				cancel = publisherCancel
+				done = make(chan error, 1)
+
+				go func() {
+					done <- publisher.Run(
+						publisherContext,
+					)
+				}()
+
+				return nil
+			},
+
+			OnStop: func(
+				ctx context.Context,
+			) error {
+				if cancel == nil {
+					return nil
+				}
+
+				cancel()
+
+				select {
+				case err := <-done:
+					if err != nil {
+						return fmt.Errorf(
+							"stop outbox publisher: %w",
+							err,
+						)
+					}
+
+					return nil
+
+				case <-ctx.Done():
+					return fmt.Errorf(
+						"wait outbox publisher shutdown: %w",
 						ctx.Err(),
 					)
 				}

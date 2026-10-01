@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,12 @@ const (
 	defaultOutboxMaxBackoff           = 5 * time.Minute
 	defaultOutboxBatchSize            = 100
 	defaultApplicationShutdownTimeout = 10 * time.Second
+
+	defaultAWSRegion          = "us-east-1"
+	defaultAWSEndpointURL     = "http://localstack:4566"
+	defaultAWSAccessKeyID     = "test"
+	defaultAWSSecretAccessKey = "test"
+	defaultSQSOutboxQueueName = "wager-events.fifo"
 )
 
 type Config struct {
@@ -29,6 +36,7 @@ type Config struct {
 	Database    DatabaseConfig
 	Reference   ReferenceConfig
 	Outbox      OutboxConfig
+	SQS         SQSConfig
 	Application ApplicationConfig
 }
 
@@ -55,6 +63,14 @@ type OutboxConfig struct {
 	RetryBackoff time.Duration
 	MaxBackoff   time.Duration
 	BatchSize    int
+}
+
+type SQSConfig struct {
+	Region          string
+	EndpointURL     string
+	AccessKeyID     string
+	SecretAccessKey string
+	OutboxQueueName string
 }
 
 type ApplicationConfig struct {
@@ -166,7 +182,7 @@ func Load() (Config, error) {
 			),
 		},
 		Database: DatabaseConfig{
-			URL:              os.Getenv("DATABASE_URL"),
+			URL:              strings.TrimSpace(os.Getenv("DATABASE_URL")),
 			MaxConnections:   int32(maxConnections),
 			MinConnections:   int32(minConnections),
 			ConnectTimeout:   connectTimeout,
@@ -183,6 +199,28 @@ func Load() (Config, error) {
 			MaxBackoff:   outboxMaxBackoff,
 			BatchSize:    outboxBatchSize,
 		},
+		SQS: SQSConfig{
+			Region: envOrDefault(
+				"AWS_REGION",
+				defaultAWSRegion,
+			),
+			EndpointURL: envOrDefault(
+				"AWS_ENDPOINT_URL",
+				defaultAWSEndpointURL,
+			),
+			AccessKeyID: envOrDefault(
+				"AWS_ACCESS_KEY_ID",
+				defaultAWSAccessKeyID,
+			),
+			SecretAccessKey: envOrDefault(
+				"AWS_SECRET_ACCESS_KEY",
+				defaultAWSSecretAccessKey,
+			),
+			OutboxQueueName: envOrDefault(
+				"SQS_OUTBOX_QUEUE_NAME",
+				defaultSQSOutboxQueueName,
+			),
+		},
 		Application: ApplicationConfig{
 			ShutdownTimeout: shutdownTimeout,
 		},
@@ -196,7 +234,7 @@ func Load() (Config, error) {
 }
 
 func (c Config) Validate() error {
-	if c.Database.URL == "" {
+	if strings.TrimSpace(c.Database.URL) == "" {
 		return errors.New("DATABASE_URL is required")
 	}
 
@@ -248,34 +286,65 @@ func (c Config) Validate() error {
 		)
 	}
 
-	if c.Outbox.PollInterval <= 0 {
+	if c.Outbox.PollInterval != 0 && c.Outbox.PollInterval <= 0 {
 		return errors.New(
 			"OUTBOX_POLL_INTERVAL must be greater than zero",
 		)
 	}
 
-	if c.Outbox.RetryBackoff <= 0 {
+	if c.Outbox.RetryBackoff != 0 && c.Outbox.RetryBackoff <= 0 {
 		return errors.New(
 			"OUTBOX_RETRY_BACKOFF must be greater than zero",
 		)
 	}
 
-	if c.Outbox.MaxBackoff <= 0 {
+	if c.Outbox.MaxBackoff != 0 && c.Outbox.MaxBackoff <= 0 {
 		return errors.New(
 			"OUTBOX_MAX_BACKOFF must be greater than zero",
 		)
 	}
 
-	if c.Outbox.MaxBackoff < c.Outbox.RetryBackoff {
+	if c.Outbox.RetryBackoff != 0 &&
+		c.Outbox.MaxBackoff != 0 &&
+		c.Outbox.MaxBackoff < c.Outbox.RetryBackoff {
 		return errors.New(
 			"OUTBOX_MAX_BACKOFF cannot be lower than OUTBOX_RETRY_BACKOFF",
 		)
 	}
 
-	if c.Outbox.BatchSize <= 0 {
+	if c.Outbox.BatchSize < 0 {
 		return errors.New(
-			"OUTBOX_BATCH_SIZE must be greater than zero",
+			"OUTBOX_BATCH_SIZE cannot be negative",
 		)
+	}
+
+	if strings.TrimSpace(c.SQS.Region) != "" {
+		if strings.TrimSpace(c.SQS.AccessKeyID) == "" {
+			return errors.New(
+				"AWS_ACCESS_KEY_ID is required when SQS is configured",
+			)
+		}
+
+		if strings.TrimSpace(c.SQS.SecretAccessKey) == "" {
+			return errors.New(
+				"AWS_SECRET_ACCESS_KEY is required when SQS is configured",
+			)
+		}
+
+		if strings.TrimSpace(c.SQS.OutboxQueueName) == "" {
+			return errors.New(
+				"SQS_OUTBOX_QUEUE_NAME is required when SQS is configured",
+			)
+		}
+
+		if !strings.HasSuffix(
+			strings.TrimSpace(c.SQS.OutboxQueueName),
+			".fifo",
+		) {
+			return errors.New(
+				"SQS_OUTBOX_QUEUE_NAME must reference a FIFO queue",
+			)
+		}
 	}
 
 	if c.Application.ShutdownTimeout <= 0 {
@@ -284,7 +353,7 @@ func (c Config) Validate() error {
 		)
 	}
 
-	if c.HTTP.Address == "" {
+	if strings.TrimSpace(c.HTTP.Address) == "" {
 		return errors.New("HTTP_ADDRESS is required")
 	}
 
@@ -295,7 +364,7 @@ func envOrDefault(
 	key string,
 	fallback string,
 ) string {
-	value := os.Getenv(key)
+	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}
@@ -307,7 +376,7 @@ func envInt(
 	key string,
 	fallback int,
 ) (int, error) {
-	value := os.Getenv(key)
+	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback, nil
 	}
@@ -328,7 +397,7 @@ func envDuration(
 	key string,
 	fallback time.Duration,
 ) (time.Duration, error) {
-	value := os.Getenv(key)
+	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback, nil
 	}
@@ -347,11 +416,13 @@ func envDuration(
 
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"http=%s db_max=%d db_min=%d reference_batch=%d outbox_batch=%d",
+		"http=%s db_max=%d db_min=%d reference_batch=%d outbox_batch=%d sqs_region=%s sqs_queue=%s",
 		c.HTTP.Address,
 		c.Database.MaxConnections,
 		c.Database.MinConnections,
 		c.Reference.BatchSize,
 		c.Outbox.BatchSize,
+		c.SQS.Region,
+		c.SQS.OutboxQueueName,
 	)
 }
