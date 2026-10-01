@@ -329,18 +329,29 @@ func (h *WagerHandler) writeProcessError(
 	switch {
 	case errors.Is(
 		err,
-		applicationwager.ErrIdempotencyConflict,
+		applicationwager.ErrExternalIDConflict,
 	):
 		writeError(
 			writer,
 			http.StatusConflict,
-			"IDEMPOTENCY_CONFLICT",
-			"idempotency key was already used with a different payload",
+			"EXTERNAL_TRANSACTION_CONFLICT",
+			"external transaction id was already used by another operation",
 		)
 
 	case errors.Is(
 		err,
-		applicationwager.ErrExternalIDConflict,
+		applicationwager.ErrReversalConflict,
+	):
+		writeError(
+			writer,
+			http.StatusConflict,
+			"REVERSAL_CONFLICT",
+			"reference transaction was already reversed",
+		)
+
+	case errors.Is(
+		err,
+		walletpostgres.ErrNotFound,
 	):
 		writeError(
 			writer,

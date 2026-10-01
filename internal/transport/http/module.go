@@ -7,6 +7,7 @@ var Module = fx.Module(
 
 	fx.Provide(
 		NewWagerHandler,
+		NewWalletHandler,
 		NewRouter,
 		NewServer,
 	),

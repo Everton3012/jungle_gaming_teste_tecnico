@@ -25,6 +25,7 @@ var (
 	ErrNotPendingReference     = errors.New("transaction is not pending reference")
 	ErrIdempotencyConflict     = errors.New("idempotency key already used with different payload")
 	ErrExternalIDConflict      = errors.New("external transaction id already used with different operation")
+	ErrReversalConflict        = errors.New("reference transaction was already reversed")
 	ErrConcurrentRetryExceeded = errors.New("concurrent wallet update retry limit exceeded")
 )
 
@@ -359,6 +360,10 @@ func (s *Service) processAttempt(
 		walletpostgres.ErrConcurrentUpdate,
 	) {
 		return ProcessResult{}, true, err
+	}
+
+	if isReversalUniqueViolation(err) {
+		return ProcessResult{}, false, ErrReversalConflict
 	}
 
 	if isUniqueViolation(err) {

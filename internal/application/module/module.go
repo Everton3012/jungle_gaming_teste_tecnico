@@ -8,6 +8,7 @@ import (
 
 	applicationreference "jungle_gaming_teste_tecnico/internal/application/reference"
 	applicationwager "jungle_gaming_teste_tecnico/internal/application/wager"
+	applicationwalletopening "jungle_gaming_teste_tecnico/internal/application/walletopening"
 	appconfig "jungle_gaming_teste_tecnico/internal/config"
 	postgresinfra "jungle_gaming_teste_tecnico/internal/infrastructure/postgres"
 	ledgerpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/ledger"
@@ -25,6 +26,7 @@ var Module = fx.Module(
 		provideWagerTransactionRepository,
 		provideLedgerRepository,
 		provideWagerService,
+		provideWalletOpeningService,
 		provideReferenceWorker,
 	),
 
@@ -117,6 +119,29 @@ func provideReferenceWorker(
 	}
 
 	return worker, nil
+}
+
+func provideWalletOpeningService(
+	transactionManager *postgresinfra.TransactionManager,
+	walletRepository *walletpostgres.Repository,
+	transactionRepository *transactionpostgres.Repository,
+	ledgerRepository *ledgerpostgres.Repository,
+) (*applicationwalletopening.Service, error) {
+	service, err :=
+		applicationwalletopening.NewService(
+			transactionManager,
+			walletRepository,
+			transactionRepository,
+			ledgerRepository,
+		)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create wallet opening service: %w",
+			err,
+		)
+	}
+
+	return service, nil
 }
 
 func runReferenceWorker(

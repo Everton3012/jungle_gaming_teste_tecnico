@@ -34,3 +34,14 @@ type errorResponse struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
+
+type createWalletRequest struct {
+	PlayerID       string       `json:"playerId"`
+	InitialBalance moneyRequest `json:"initialBalance"`
+}
+
+type createWalletResponse struct {
+	WalletID string        `json:"walletId"`
+	PlayerID string        `json:"playerId"`
+	Balance  moneyResponse `json:"balance"`
+}
