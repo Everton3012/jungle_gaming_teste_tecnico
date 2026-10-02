@@ -17,6 +17,7 @@ var (
 	ErrNotFound           = errors.New("ledger entry not found")
 	ErrRepositoryRequired = errors.New("database connection is required")
 	ErrEntryRequired      = errors.New("ledger entry is required")
+	ErrInvalidLimit       = errors.New("ledger limit must be greater than zero")
 )
 
 type DBTX interface {
@@ -118,6 +119,42 @@ func (r *Repository) FindByWallet(
 	}
 	defer rows.Close()
 
+	return scanEntries(rows)
+}
+
+func (r *Repository) FindByWalletPage(
+	ctx context.Context,
+	walletID string,
+	afterCreatedAt *time.Time,
+	afterID string,
+	limit int,
+) ([]*domainledger.Entry, error) {
+	if limit <= 0 {
+		return nil, ErrInvalidLimit
+	}
+
+	const query = `
+SELECT
+    id, wallet_id, transaction_id, direction, amount, currency,
+    balance_before, balance_after, created_at
+FROM ledger_entries
+WHERE wallet_id = $1
+  AND (
+      $2::timestamptz IS NULL
+      OR (created_at, id) > ($2::timestamptz, $3)
+  )
+ORDER BY created_at ASC, id ASC
+LIMIT $4;`
+
+	var after any
+	if afterCreatedAt != nil {
+		after = afterCreatedAt.UTC()
+	}
+	rows, err := r.db.Query(ctx, query, walletID, after, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("find ledger page by wallet: %w", err)
+	}
+	defer rows.Close()
 	return scanEntries(rows)
 }
 

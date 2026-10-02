@@ -12,7 +12,6 @@ func newID() (string, error) {
 		return "", fmt.Errorf("generate id: %w", err)
 	}
 
-	// UUID v4.
 	value[6] = (value[6] & 0x0f) | 0x40
 	value[8] = (value[8] & 0x3f) | 0x80
 

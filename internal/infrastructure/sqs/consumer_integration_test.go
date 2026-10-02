@@ -13,7 +13,7 @@ import (
 	sqsinfra "jungle_gaming_teste_tecnico/internal/infrastructure/sqs"
 )
 
-const defaultConsumerTestQueueName = "wager-transactions.fifo"
+const defaultConsumerTestQueueName = "sqs-consumer-integration.fifo"
 
 func TestConsumerReceivesAndDeletesMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(

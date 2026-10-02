@@ -208,6 +208,80 @@ func (r *Repository) FindPendingReferences(
 	return transactions, nil
 }
 
+type PendingReferenceClaim struct {
+	TransactionID string
+	Attempts      int
+}
+
+func (r *Repository) ClaimPendingReferences(
+	ctx context.Context,
+	now time.Time,
+	leaseDuration time.Duration,
+	limit int,
+) ([]PendingReferenceClaim, error) {
+	if now.IsZero() {
+		return nil, errors.New("claim time must not be zero")
+	}
+	if leaseDuration <= 0 {
+		return nil, errors.New("reference lease duration must be greater than zero")
+	}
+	if limit <= 0 {
+		return nil, ErrInvalidLimit
+	}
+
+	now = now.UTC()
+	rows, err := r.db.Query(ctx, claimPendingReferenceIDsQuery, now, limit, now.Add(leaseDuration))
+	if err != nil {
+		return nil, fmt.Errorf("claim pending wager references: %w", err)
+	}
+	defer rows.Close()
+
+	claims := make([]PendingReferenceClaim, 0)
+	for rows.Next() {
+		var claim PendingReferenceClaim
+		if err := rows.Scan(&claim.TransactionID, &claim.Attempts); err != nil {
+			return nil, fmt.Errorf("scan pending reference claim: %w", err)
+		}
+		claims = append(claims, claim)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending reference claims: %w", err)
+	}
+	return claims, nil
+}
+
+func (r *Repository) SchedulePendingReference(
+	ctx context.Context,
+	transactionID string,
+	nextAttemptAt time.Time,
+) error {
+	if nextAttemptAt.IsZero() {
+		return errors.New("next reference attempt time must not be zero")
+	}
+	result, err := r.db.Exec(ctx, schedulePendingReferenceQuery, transactionID, nextAttemptAt.UTC())
+	if err != nil {
+		return fmt.Errorf("schedule pending reference: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) ReleasePendingReference(
+	ctx context.Context,
+	transactionID string,
+) error {
+	result, err := r.db.Exec(ctx, releasePendingReferenceQuery, transactionID)
+	if err != nil {
+		return fmt.Errorf("release pending reference lease: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (r *Repository) find(
 	ctx context.Context,
 	query string,

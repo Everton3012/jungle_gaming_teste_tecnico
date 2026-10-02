@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -220,4 +221,49 @@ func (d *Destination) QueueURL() string {
 	}
 
 	return d.queueURL
+}
+
+func (c *Client) Ready(ctx context.Context, queueName string) error {
+	if c == nil || c.sqs == nil {
+		return ErrClientRequired
+	}
+	queueName = strings.TrimSpace(queueName)
+	if queueName == "" {
+		return ErrQueueNameRequired
+	}
+	_, err := c.sqs.GetQueueUrl(ctx, &awssqs.GetQueueUrlInput{QueueName: aws.String(queueName)})
+	if err != nil {
+		return fmt.Errorf("check SQS queue %q: %w", queueName, err)
+	}
+	return nil
+}
+
+func (c *Client) ApproximateMessages(ctx context.Context, queueName string) (int64, error) {
+	if c == nil || c.sqs == nil {
+		return 0, ErrClientRequired
+	}
+	queueName = strings.TrimSpace(queueName)
+	if queueName == "" {
+		return 0, ErrQueueNameRequired
+	}
+	urlResult, err := c.sqs.GetQueueUrl(ctx, &awssqs.GetQueueUrlInput{QueueName: aws.String(queueName)})
+	if err != nil || urlResult.QueueUrl == nil {
+		return 0, fmt.Errorf("get SQS queue URL %q: %w", queueName, err)
+	}
+	result, err := c.sqs.GetQueueAttributes(ctx, &awssqs.GetQueueAttributesInput{
+		QueueUrl:       urlResult.QueueUrl,
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeName("ApproximateNumberOfMessages")},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("get SQS queue attributes %q: %w", queueName, err)
+	}
+	value := result.Attributes["ApproximateNumberOfMessages"]
+	if value == "" {
+		return 0, nil
+	}
+	count, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse SQS approximate messages: %w", err)
+	}
+	return count, nil
 }

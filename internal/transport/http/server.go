@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 
@@ -28,6 +29,7 @@ func NewServer(
 
 func RunServer(
 	lifecycle fx.Lifecycle,
+	shutdowner fx.Shutdowner,
 	server *http.Server,
 	cfg appconfig.Config,
 ) {
@@ -37,54 +39,30 @@ func RunServer(
 		fx.Hook{
 			OnStart: func(ctx context.Context) error {
 				var err error
-
-				listener, err = net.Listen(
-					"tcp",
-					server.Addr,
-				)
+				listener, err = net.Listen("tcp", server.Addr)
 				if err != nil {
-					return fmt.Errorf(
-						"listen HTTP on %s: %w",
-						server.Addr,
-						err,
-					)
+					return fmt.Errorf("listen HTTP on %s: %w", server.Addr, err)
 				}
 
 				go func() {
 					err := server.Serve(listener)
-
-					if err != nil &&
-						!errors.Is(
-							err,
-							http.ErrServerClosed,
-						) {
-						// Logging estruturado será conectado
-						// na etapa de observabilidade.
+					if err == nil || errors.Is(err, http.ErrServerClosed) {
+						return
+					}
+					slog.Error("http_server_stopped", "address", server.Addr, "error", err)
+					if shutdownErr := shutdowner.Shutdown(); shutdownErr != nil {
+						slog.Error("application_shutdown_request_failed", "component", "http-server", "error", shutdownErr)
 					}
 				}()
-
 				return nil
 			},
 
 			OnStop: func(ctx context.Context) error {
-				shutdownContext, cancel :=
-					context.WithTimeout(
-						ctx,
-						cfg.Application.ShutdownTimeout,
-					)
+				shutdownContext, cancel := context.WithTimeout(ctx, cfg.Application.ShutdownTimeout)
 				defer cancel()
-
-				if err :=
-					server.Shutdown(
-						shutdownContext,
-					); err != nil {
-
-					return fmt.Errorf(
-						"shutdown HTTP server: %w",
-						err,
-					)
+				if err := server.Shutdown(shutdownContext); err != nil {
+					return fmt.Errorf("shutdown HTTP server: %w", err)
 				}
-
 				return nil
 			},
 		},

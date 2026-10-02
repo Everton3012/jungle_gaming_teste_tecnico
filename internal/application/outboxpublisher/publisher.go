@@ -7,6 +7,7 @@ import (
 	"time"
 
 	domainoutbox "jungle_gaming_teste_tecnico/internal/domain/outbox"
+	"jungle_gaming_teste_tecnico/internal/observability"
 )
 
 var (
@@ -189,6 +190,7 @@ func (p *Publisher) ProcessBatch(
 			event,
 		)
 		if err != nil {
+			observability.Default.OutboxPublishRetries.Add(1)
 			rescheduleAt := p.now()
 			availableAt := rescheduleAt.Add(
 				p.retryDelay(event.Attempts()),

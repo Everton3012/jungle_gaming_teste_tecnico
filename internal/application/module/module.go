@@ -3,17 +3,20 @@ package module
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
 	applicationoutbox "jungle_gaming_teste_tecnico/internal/application/outboxpublisher"
+	applicationquery "jungle_gaming_teste_tecnico/internal/application/query"
 	applicationreference "jungle_gaming_teste_tecnico/internal/application/reference"
 	applicationwager "jungle_gaming_teste_tecnico/internal/application/wager"
 	applicationwagerconsumer "jungle_gaming_teste_tecnico/internal/application/wagerconsumer"
 	applicationwalletopening "jungle_gaming_teste_tecnico/internal/application/walletopening"
 	appconfig "jungle_gaming_teste_tecnico/internal/config"
 	postgresinfra "jungle_gaming_teste_tecnico/internal/infrastructure/postgres"
+	inboxpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/inbox"
 	ledgerpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/ledger"
 	outboxpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/outbox"
 	transactionpostgres "jungle_gaming_teste_tecnico/internal/infrastructure/postgres/wagertransaction"
@@ -29,8 +32,10 @@ var Module = fx.Module(
 		provideWagerTransactionRepository,
 		provideLedgerRepository,
 		provideOutboxRepository,
+		provideInboxRepository,
 
 		provideWagerService,
+		provideQueryService,
 		provideWalletOpeningService,
 
 		provideReferenceWorker,
@@ -115,6 +120,22 @@ func provideOutboxRepository(
 	return repository, nil
 }
 
+func provideInboxRepository(
+	pool *pgxpool.Pool,
+) (*inboxpostgres.Repository, error) {
+	repository, err :=
+		inboxpostgres.NewRepository(pool)
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create inbox repository: %w",
+			err,
+		)
+	}
+
+	return repository, nil
+}
+
 func provideWagerService(
 	transactionManager *postgresinfra.TransactionManager,
 	walletRepository *walletpostgres.Repository,
@@ -138,6 +159,24 @@ func provideWagerService(
 		)
 	}
 
+	return service, nil
+}
+
+func provideQueryService(
+	transactionManager *postgresinfra.TransactionManager,
+	walletRepository *walletpostgres.Repository,
+	transactionRepository *transactionpostgres.Repository,
+	ledgerRepository *ledgerpostgres.Repository,
+) (*applicationquery.Service, error) {
+	service, err := applicationquery.NewService(
+		transactionManager,
+		walletRepository,
+		transactionRepository,
+		ledgerRepository,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create query service: %w", err)
+	}
 	return service, nil
 }
 
@@ -177,11 +216,12 @@ func provideReferenceWorker(
 			transactionRepository,
 			wagerService,
 			applicationreference.Config{
-				BatchSize: cfg.Reference.BatchSize,
-
-				PollInterval: cfg.Reference.PollInterval,
-
-				RetryBackoff: cfg.Reference.RetryBackoff,
+				BatchSize:     cfg.Reference.BatchSize,
+				PollInterval:  cfg.Reference.PollInterval,
+				RetryBackoff:  cfg.Reference.RetryBackoff,
+				MaxBackoff:    cfg.Reference.MaxBackoff,
+				LeaseDuration: cfg.Reference.LeaseDuration,
+				MaxAttempts:   cfg.Reference.MaxAttempts,
 			},
 		)
 
@@ -324,11 +364,15 @@ func provideWagerConsumerHandler(
 func provideWagerConsumerWorker(
 	consumer *sqsinfra.Consumer,
 	handler *applicationwagerconsumer.ServiceHandler,
+	inboxRepository *inboxpostgres.Repository,
+	transactionManager *postgresinfra.TransactionManager,
 ) (*applicationwagerconsumer.Worker, error) {
 	worker, err :=
 		applicationwagerconsumer.NewWorker(
 			consumer,
 			handler,
+			inboxRepository,
+			transactionManager,
 		)
 
 	if err != nil {
@@ -343,135 +387,53 @@ func provideWagerConsumerWorker(
 
 func runReferenceWorker(
 	lifecycle fx.Lifecycle,
+	shutdowner fx.Shutdowner,
 	worker *applicationreference.Worker,
 ) {
-	var (
-		cancel context.CancelFunc
-		done   chan error
-	)
-
-	lifecycle.Append(
-		fx.Hook{
-			OnStart: func(
-				context.Context,
-			) error {
-				workerContext, workerCancel :=
-					context.WithCancel(
-						context.Background(),
-					)
-
-				cancel = workerCancel
-				done = make(chan error, 1)
-
-				go func() {
-					done <- worker.Run(
-						workerContext,
-					)
-				}()
-
-				return nil
-			},
-
-			OnStop: func(
-				ctx context.Context,
-			) error {
-				if cancel == nil {
-					return nil
-				}
-
-				cancel()
-
-				select {
-				case err := <-done:
-					if err != nil {
-						return fmt.Errorf(
-							"stop reference worker: %w",
-							err,
-						)
-					}
-
-					return nil
-
-				case <-ctx.Done():
-					return fmt.Errorf(
-						"wait reference worker shutdown: %w",
-						ctx.Err(),
-					)
-				}
-			},
-		},
+	runWorker(
+		lifecycle,
+		shutdowner,
+		"reference-worker",
+		worker.Run,
 	)
 }
 
 func runOutboxPublisher(
 	lifecycle fx.Lifecycle,
+	shutdowner fx.Shutdowner,
 	publisher *applicationoutbox.Publisher,
 ) {
-	var (
-		cancel context.CancelFunc
-		done   chan error
-	)
-
-	lifecycle.Append(
-		fx.Hook{
-			OnStart: func(
-				context.Context,
-			) error {
-				publisherContext, publisherCancel :=
-					context.WithCancel(
-						context.Background(),
-					)
-
-				cancel = publisherCancel
-				done = make(chan error, 1)
-
-				go func() {
-					done <- publisher.Run(
-						publisherContext,
-					)
-				}()
-
-				return nil
-			},
-
-			OnStop: func(
-				ctx context.Context,
-			) error {
-				if cancel == nil {
-					return nil
-				}
-
-				cancel()
-
-				select {
-				case err := <-done:
-					if err != nil {
-						return fmt.Errorf(
-							"stop outbox publisher: %w",
-							err,
-						)
-					}
-
-					return nil
-
-				case <-ctx.Done():
-					return fmt.Errorf(
-						"wait outbox publisher shutdown: %w",
-						ctx.Err(),
-					)
-				}
-			},
-		},
+	runWorker(
+		lifecycle,
+		shutdowner,
+		"outbox-publisher",
+		publisher.Run,
 	)
 }
 
 func runWagerConsumerWorker(
 	lifecycle fx.Lifecycle,
+	shutdowner fx.Shutdowner,
 	worker *applicationwagerconsumer.Worker,
+) {
+	runWorker(
+		lifecycle,
+		shutdowner,
+		"wager-consumer",
+		worker.Run,
+	)
+}
+
+func runWorker(
+	lifecycle fx.Lifecycle,
+	shutdowner fx.Shutdowner,
+	name string,
+	run func(context.Context) error,
 ) {
 	var (
 		cancel context.CancelFunc
-		done   chan error
+
+		done chan error
 	)
 
 	lifecycle.Append(
@@ -485,12 +447,21 @@ func runWagerConsumerWorker(
 					)
 
 				cancel = workerCancel
-				done = make(chan error, 1)
+
+				done = make(
+					chan error,
+					1,
+				)
 
 				go func() {
-					done <- worker.Run(
-						workerContext,
-					)
+					err := run(workerContext)
+					done <- err
+					if err != nil && workerContext.Err() == nil {
+						slog.Error("background_worker_stopped", "worker", name, "error", err)
+						if shutdownErr := shutdowner.Shutdown(); shutdownErr != nil {
+							slog.Error("application_shutdown_request_failed", "worker", name, "error", shutdownErr)
+						}
+					}
 				}()
 
 				return nil
@@ -505,22 +476,16 @@ func runWagerConsumerWorker(
 
 				cancel()
 
+				if done == nil {
+					return nil
+				}
+
 				select {
 				case err := <-done:
-					if err != nil {
-						return fmt.Errorf(
-							"stop wager consumer worker: %w",
-							err,
-						)
-					}
-
-					return nil
+					return err
 
 				case <-ctx.Done():
-					return fmt.Errorf(
-						"wait wager consumer worker shutdown: %w",
-						ctx.Err(),
-					)
+					return ctx.Err()
 				}
 			},
 		},

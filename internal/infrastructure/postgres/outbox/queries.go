@@ -53,8 +53,14 @@ const claimPendingQuery = `
 WITH candidates AS (
     SELECT id
     FROM outbox_events
-    WHERE status = 'PENDING'
-      AND available_at <= $1
+    WHERE (
+            status = 'PENDING'
+            AND available_at <= $1
+          )
+       OR (
+            status = 'PROCESSING'
+            AND (locked_until IS NULL OR locked_until <= $1)
+          )
     ORDER BY available_at, created_at, id
     FOR UPDATE SKIP LOCKED
     LIMIT $2
@@ -63,6 +69,7 @@ UPDATE outbox_events AS event
 SET
     status = 'PROCESSING',
     attempts = event.attempts + 1,
+    locked_until = $1 + INTERVAL '30 seconds',
     updated_at = $1
 FROM candidates
 WHERE event.id = candidates.id
@@ -87,6 +94,7 @@ SET
     status = 'PUBLISHED',
     published_at = $2,
     last_error = NULL,
+    locked_until = NULL,
     updated_at = $2
 WHERE id = $1
   AND status = 'PROCESSING';
@@ -99,6 +107,7 @@ SET
     available_at = $2,
     published_at = NULL,
     last_error = $3,
+    locked_until = NULL,
     updated_at = $4
 WHERE id = $1
   AND status = 'PROCESSING';

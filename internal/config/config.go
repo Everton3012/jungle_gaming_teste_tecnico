@@ -17,7 +17,10 @@ const (
 	defaultDatabaseOperationTimeout   = 5 * time.Second
 	defaultReferencePollInterval      = 2 * time.Second
 	defaultReferenceRetryBackoff      = 5 * time.Second
+	defaultReferenceMaxBackoff        = 5 * time.Minute
+	defaultReferenceLeaseDuration     = 30 * time.Second
 	defaultReferenceBatchSize         = 100
+	defaultReferenceMaxAttempts       = 10
 	defaultOutboxPollInterval         = 2 * time.Second
 	defaultOutboxRetryBackoff         = 5 * time.Second
 	defaultOutboxMaxBackoff           = 5 * time.Minute
@@ -34,6 +37,11 @@ const (
 	defaultSQSConsumerMaxMessages       = 10
 	defaultSQSConsumerWaitTime          = 20 * time.Second
 	defaultSQSConsumerVisibilityTimeout = 30 * time.Second
+
+	defaultAuthIssuer          = "http://localhost:8085/realms/jungle"
+	defaultAuthJWKSURL         = "http://keycloak:8080/realms/jungle/protocol/openid-connect/certs"
+	defaultAuthWalletClientID  = "wallet-service"
+	defaultAuthProviderClients = "provider-a,provider-b"
 )
 
 type Config struct {
@@ -42,6 +50,7 @@ type Config struct {
 	Reference   ReferenceConfig
 	Outbox      OutboxConfig
 	SQS         SQSConfig
+	Auth        AuthConfig
 	Application ApplicationConfig
 }
 
@@ -58,9 +67,12 @@ type DatabaseConfig struct {
 }
 
 type ReferenceConfig struct {
-	PollInterval time.Duration
-	RetryBackoff time.Duration
-	BatchSize    int
+	PollInterval  time.Duration
+	RetryBackoff  time.Duration
+	MaxBackoff    time.Duration
+	LeaseDuration time.Duration
+	BatchSize     int
+	MaxAttempts   int
 }
 
 type OutboxConfig struct {
@@ -82,6 +94,13 @@ type SQSConfig struct {
 	ConsumerMaxMessages       int32
 	ConsumerWaitTime          time.Duration
 	ConsumerVisibilityTimeout time.Duration
+}
+
+type AuthConfig struct {
+	Issuer          string
+	JWKSURL         string
+	WalletClientID  string
+	ProviderClients []string
 }
 
 type ApplicationConfig struct {
@@ -140,6 +159,30 @@ func Load() (Config, error) {
 	referenceBatchSize, err := envInt(
 		"REFERENCE_BATCH_SIZE",
 		defaultReferenceBatchSize,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	referenceMaxAttempts, err := envInt(
+		"REFERENCE_MAX_ATTEMPTS",
+		defaultReferenceMaxAttempts,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	referenceMaxBackoff, err := envDuration(
+		"REFERENCE_MAX_BACKOFF",
+		defaultReferenceMaxBackoff,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	referenceLeaseDuration, err := envDuration(
+		"REFERENCE_LEASE_DURATION",
+		defaultReferenceLeaseDuration,
 	)
 	if err != nil {
 		return Config{}, err
@@ -228,9 +271,12 @@ func Load() (Config, error) {
 		},
 
 		Reference: ReferenceConfig{
-			PollInterval: referencePollInterval,
-			RetryBackoff: referenceRetryBackoff,
-			BatchSize:    referenceBatchSize,
+			PollInterval:  referencePollInterval,
+			RetryBackoff:  referenceRetryBackoff,
+			MaxBackoff:    referenceMaxBackoff,
+			LeaseDuration: referenceLeaseDuration,
+			BatchSize:     referenceBatchSize,
+			MaxAttempts:   referenceMaxAttempts,
 		},
 
 		Outbox: OutboxConfig{
@@ -276,6 +322,13 @@ func Load() (Config, error) {
 			ConsumerWaitTime: consumerWaitTime,
 
 			ConsumerVisibilityTimeout: consumerVisibilityTimeout,
+		},
+
+		Auth: AuthConfig{
+			Issuer:          envOrDefault("AUTH_ISSUER", defaultAuthIssuer),
+			JWKSURL:         envOrDefault("AUTH_JWKS_URL", defaultAuthJWKSURL),
+			WalletClientID:  envOrDefault("AUTH_WALLET_CLIENT_ID", defaultAuthWalletClientID),
+			ProviderClients: splitCSV(envOrDefault("AUTH_PROVIDER_CLIENTS", defaultAuthProviderClients)),
 		},
 
 		Application: ApplicationConfig{
@@ -344,6 +397,18 @@ func (c Config) Validate() error {
 		return errors.New(
 			"REFERENCE_BATCH_SIZE must be greater than zero",
 		)
+	}
+
+	if c.Reference.MaxAttempts <= 0 {
+		return errors.New("REFERENCE_MAX_ATTEMPTS must be greater than zero")
+	}
+
+	if c.Reference.MaxBackoff < c.Reference.RetryBackoff {
+		return errors.New("REFERENCE_MAX_BACKOFF cannot be lower than REFERENCE_RETRY_BACKOFF")
+	}
+
+	if c.Reference.LeaseDuration <= 0 {
+		return errors.New("REFERENCE_LEASE_DURATION must be greater than zero")
 	}
 
 	if c.Outbox.PollInterval != 0 &&
@@ -461,6 +526,22 @@ func (c Config) Validate() error {
 		}
 	}
 
+	if strings.TrimSpace(c.Auth.Issuer) == "" {
+		return errors.New("AUTH_ISSUER is required")
+	}
+
+	if strings.TrimSpace(c.Auth.JWKSURL) == "" {
+		return errors.New("AUTH_JWKS_URL is required")
+	}
+
+	if strings.TrimSpace(c.Auth.WalletClientID) == "" {
+		return errors.New("AUTH_WALLET_CLIENT_ID is required")
+	}
+
+	if len(c.Auth.ProviderClients) == 0 {
+		return errors.New("AUTH_PROVIDER_CLIENTS must contain at least one provider client")
+	}
+
 	if c.Application.ShutdownTimeout <= 0 {
 		return errors.New(
 			"APPLICATION_SHUTDOWN_TIMEOUT must be greater than zero",
@@ -513,6 +594,24 @@ func envInt(
 	}
 
 	return parsed, nil
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, exists := seen[part]; exists {
+			continue
+		}
+		seen[part] = struct{}{}
+		result = append(result, part)
+	}
+	return result
 }
 
 func envDuration(

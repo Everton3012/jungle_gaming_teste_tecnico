@@ -1,40 +1,87 @@
+x-api-common: &api-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment:
+    HTTP_ADDRESS: ${HTTP_ADDRESS:-:8080}
+    DATABASE_URL: ${DATABASE_URL:-postgres://jungle:jungle@postgres:5432/jungle_gaming?sslmode=disable}
+    DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-20}
+    DATABASE_MIN_CONNECTIONS: ${DATABASE_MIN_CONNECTIONS:-2}
+    DATABASE_CONNECT_TIMEOUT: ${DATABASE_CONNECT_TIMEOUT:-5s}
+    DATABASE_OPERATION_TIMEOUT: ${DATABASE_OPERATION_TIMEOUT:-5s}
+    REFERENCE_POLL_INTERVAL: ${REFERENCE_POLL_INTERVAL:-2s}
+    REFERENCE_RETRY_BACKOFF: ${REFERENCE_RETRY_BACKOFF:-5s}
+    REFERENCE_MAX_BACKOFF: ${REFERENCE_MAX_BACKOFF:-5m}
+    REFERENCE_LEASE_DURATION: ${REFERENCE_LEASE_DURATION:-30s}
+    REFERENCE_BATCH_SIZE: ${REFERENCE_BATCH_SIZE:-100}
+    REFERENCE_MAX_ATTEMPTS: ${REFERENCE_MAX_ATTEMPTS:-10}
+    OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-2s}
+    OUTBOX_RETRY_BACKOFF: ${OUTBOX_RETRY_BACKOFF:-5s}
+    OUTBOX_MAX_BACKOFF: ${OUTBOX_MAX_BACKOFF:-5m}
+    OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+    AWS_REGION: ${AWS_REGION:-us-east-1}
+    AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://localstack:4566}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+    SQS_OUTBOX_QUEUE_NAME: ${SQS_OUTBOX_QUEUE_NAME:-wager-events.fifo}
+    SQS_CONSUMER_QUEUE_NAME: ${SQS_CONSUMER_QUEUE_NAME:-wager-transactions.fifo}
+    SQS_CONSUMER_MAX_MESSAGES: ${SQS_CONSUMER_MAX_MESSAGES:-10}
+    SQS_CONSUMER_WAIT_TIME: ${SQS_CONSUMER_WAIT_TIME:-20s}
+    SQS_CONSUMER_VISIBILITY_TIMEOUT: ${SQS_CONSUMER_VISIBILITY_TIMEOUT:-30s}
+    APPLICATION_SHUTDOWN_TIMEOUT: ${APPLICATION_SHUTDOWN_TIMEOUT:-10s}
+    AUTH_ISSUER: ${AUTH_ISSUER:-http://localhost:8085/realms/jungle}
+    AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://keycloak:8080/realms/jungle/protocol/openid-connect/certs}
+    AUTH_WALLET_CLIENT_ID: ${AUTH_WALLET_CLIENT_ID:-wallet-service}
+    AUTH_PROVIDER_CLIENTS: ${AUTH_PROVIDER_CLIENTS:-provider-a,provider-b}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    localstack:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+    keycloak:
+      condition: service_started
+  restart: unless-stopped
+
 services:
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: jungle-gaming-api
-    env_file:
-      - .env
+    <<: *api-common
     ports:
-      - "${APP_PORT}:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      localstack:
-        condition: service_healthy
-    restart: unless-stopped
+      - "${APP_PORT:-8080}:8080"
+
+  api-2:
+    <<: *api-common
+    profiles: ["multi"]
+    ports:
+      - "8081:8080"
+
+  api-3:
+    <<: *api-common
+    profiles: ["multi"]
+    ports:
+      - "8082:8080"
 
   postgres:
     image: postgres:17-alpine
     container_name: jungle-gaming-postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-jungle_gaming}
+      POSTGRES_USER: ${POSTGRES_USER:-jungle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jungle}
     ports:
-      - "${POSTGRES_PORT}:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+          "pg_isready -U ${POSTGRES_USER:-jungle} -d ${POSTGRES_DB:-jungle_gaming}"
         ]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
       start_period: 5s
     restart: unless-stopped
 
@@ -43,9 +90,9 @@ services:
     container_name: jungle-gaming-localstack
     environment:
       SERVICES: sqs
-      AWS_DEFAULT_REGION: us-east-1
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
       DEBUG: 0
     ports:
       - "4566:4566"
@@ -56,25 +103,46 @@ services:
       test:
         [
           "CMD-SHELL",
-          "curl -fs http://localhost:4566/_localstack/health | grep -q '\"sqs\": \"running\"'"
+          "curl -fs http://localhost:4566/_localstack/health | grep -Eq '\"sqs\": \"(available|running)\"'"
         ]
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 10s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    container_name: jungle-gaming-keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: http://localhost:8085
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8085:8080"
+    volumes:
+      - ./keycloak/realm-jungle.json:/opt/keycloak/data/import/realm-jungle.json:ro
     restart: unless-stopped
 
   migrate:
     image: migrate/migrate:v4.18.3
-    profiles:
-      - tools
+    container_name: jungle-gaming-migrate
     volumes:
-      - ./migrations:/migrations
+      - ./migrations:/migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
-    entrypoint:
-      - migrate
+    command:
+      [
+        "-path=/migrations",
+        "-database",
+        "postgres://${POSTGRES_USER:-jungle}:${POSTGRES_PASSWORD:-jungle}@postgres:5432/${POSTGRES_DB:-jungle_gaming}?sslmode=disable",
+        "up"
+      ]
+    restart: "no"
 
 volumes:
   postgres_data:

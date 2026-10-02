@@ -1,6 +1,9 @@
 package main
 
 import (
+	"log/slog"
+	"os"
+
 	"go.uber.org/fx"
 
 	applicationmodule "jungle_gaming_teste_tecnico/internal/application/module"
@@ -10,6 +13,7 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	fx.New(
 		config.Module,
 		postgres.Module,

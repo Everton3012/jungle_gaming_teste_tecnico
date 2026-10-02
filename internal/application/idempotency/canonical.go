@@ -36,7 +36,6 @@ func Canonicalize(payload []byte) ([]byte, error) {
 
 	switch {
 	case errors.Is(err, io.EOF):
-		// Exatamente um valor JSON foi recebido.
 
 	case err == nil:
 		return nil, ErrTrailingJSONData

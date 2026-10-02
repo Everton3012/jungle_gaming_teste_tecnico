@@ -823,3 +823,52 @@ func TestRepositoryRejectsInvalidOperations(t *testing.T) {
 		)
 	}
 }
+
+func TestRepositoryReclaimsExpiredProcessingLease(t *testing.T) {
+	pool := newTestPool(t)
+	cleanDatabase(t, pool)
+
+	repository, err := outboxpostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	event := newEvent(t, "outbox-expired-lease", now)
+	if err := repository.Create(ctx, event); err != nil {
+		t.Fatalf("create outbox event: %v", err)
+	}
+
+	first, err := repository.ClaimPending(ctx, now.Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if len(first) != 1 || first[0].Attempts() != 1 {
+		t.Fatalf("first claim = %#v, want one event with attempts=1", first)
+	}
+
+	beforeExpiry, err := repository.ClaimPending(ctx, now.Add(20*time.Second), 10)
+	if err != nil {
+		t.Fatalf("claim before lease expiry: %v", err)
+	}
+	if len(beforeExpiry) != 0 {
+		t.Fatalf("claim before lease expiry returned %d events, want 0", len(beforeExpiry))
+	}
+
+	reclaimed, err := repository.ClaimPending(ctx, now.Add(32*time.Second), 10)
+	if err != nil {
+		t.Fatalf("reclaim expired processing event: %v", err)
+	}
+	if len(reclaimed) != 1 {
+		t.Fatalf("reclaimed count = %d, want 1", len(reclaimed))
+	}
+	if reclaimed[0].ID() != event.ID() {
+		t.Fatalf("reclaimed id = %q, want %q", reclaimed[0].ID(), event.ID())
+	}
+	if reclaimed[0].Attempts() != 2 {
+		t.Fatalf("reclaimed attempts = %d, want 2", reclaimed[0].Attempts())
+	}
+}
