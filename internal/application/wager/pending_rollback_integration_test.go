@@ -77,12 +77,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		initialBalance,
 	)
 
-	/*
-		ROLLBACK chega antes da BET referenciada.
-
-		Não deve existir movimentação financeira.
-		A operação deve ser persistida como PENDING_REFERENCE.
-	*/
 	rollback := newRollback(
 		t,
 		rollbackID,
@@ -136,9 +130,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Confirma que PENDING_REFERENCE realmente foi persistido.
-	*/
 	persistedPending, err :=
 		env.transactionRepository.FindByID(
 			ctx,
@@ -171,9 +162,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Nenhum débito/crédito deve ter ocorrido ainda.
-	*/
 	walletBeforeReference, err :=
 		env.walletRepository.FindByID(
 			ctx,
@@ -216,11 +204,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		A BET referenciada chega depois.
-
-		10000 - 2000 = 8000.
-	*/
 	bet := newBet(
 		t,
 		betID,
@@ -268,14 +251,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Retoma o ROLLBACK.
-
-		Como a referência é uma BET (DEBIT),
-		o ROLLBACK deve produzir o movimento contrário: CREDIT.
-
-		8000 + 2000 = 10000.
-	*/
 	resumedResult, err :=
 		env.service.ResumePendingReference(
 			ctx,
@@ -325,9 +300,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Confirma resolução persistida.
-	*/
 	persistedRollback, err :=
 		env.transactionRepository.FindByID(
 			ctx,
@@ -358,9 +330,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Estado financeiro final.
-	*/
 	finalWallet, err :=
 		env.walletRepository.FindByID(
 			ctx,
@@ -381,17 +350,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Exatamente:
-
-		2 transactions:
-		  BET
-		  ROLLBACK
-
-		2 ledger entries:
-		  BET      -> DEBIT
-		  ROLLBACK -> CREDIT
-	*/
 	if got := countRows(
 		t,
 		env,
@@ -414,11 +372,6 @@ func TestServiceRollbackBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Replay do mesmo ROLLBACK.
-
-		Não pode gerar segundo crédito.
-	*/
 	replayRollback := newRollback(
 		t,
 		"transaction-pending-rollback-replay",

@@ -76,12 +76,6 @@ func TestServiceRefundBeforeBetPendingThenResolved(t *testing.T) {
 		10000,
 	)
 
-	/*
-		REFUND chega antes da BET referenciada.
-
-		A operação não pode ser perdida nem rejeitada imediatamente.
-		Ela deve ser persistida como PENDING_REFERENCE.
-	*/
 	refund := newRefund(
 		t,
 		refundID,
@@ -138,9 +132,6 @@ func TestServiceRefundBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		A operação pendente deve existir fisicamente no PostgreSQL.
-	*/
 	persistedPending, err :=
 		env.transactionRepository.FindByID(
 			ctx,
@@ -173,10 +164,6 @@ func TestServiceRefundBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Nenhuma movimentação financeira pode ocorrer enquanto
-		a referência não existir.
-	*/
 	walletBeforeReference, err :=
 		env.walletRepository.FindByID(
 			ctx,
@@ -218,9 +205,6 @@ func TestServiceRefundBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Agora a BET referenciada chega normalmente.
-	*/
 	bet := newBet(
 		t,
 		betID,
@@ -270,13 +254,6 @@ func TestServiceRefundBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Simula o worker retomando a operação persistida.
-
-		O service deve localizar a BET através de
-		(providerId, referenceExternalTransactionId),
-		resolver a referência e processar o REFUND.
-	*/
 	resumedResult, err :=
 		env.service.ResumePendingReference(
 			ctx,
@@ -327,9 +304,6 @@ func TestServiceRefundBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Valida estado final persistido.
-	*/
 	persistedRefund, err :=
 		env.transactionRepository.FindByID(
 			ctx,
@@ -379,17 +353,6 @@ func TestServiceRefundBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Temos exatamente:
-
-		1 BET
-		1 REFUND
-
-		e exatamente:
-
-		1 ledger DEBIT da BET
-		1 ledger CREDIT do REFUND
-	*/
 	if got := countRows(
 		t,
 		env,
@@ -412,11 +375,6 @@ func TestServiceRefundBeforeBetPendingThenResolved(t *testing.T) {
 		)
 	}
 
-	/*
-		Replay HTTP/SQS equivalente da mesma operação.
-
-		Não pode creditar novamente.
-	*/
 	replayRefund := newRefund(
 		t,
 		"transaction-pending-refund-replay",

@@ -178,7 +178,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Principal, error) 
 
 	hash := sha256.Sum256([]byte(segments[0] + "." + segments[1]))
 	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, hash[:], signature); err != nil {
-		// Keycloak can rotate keys. Refresh once when a cached key no longer verifies.
+
 		key, refreshErr := v.key(ctx, header.KeyID, true)
 		if refreshErr != nil {
 			return Principal{}, refreshErr

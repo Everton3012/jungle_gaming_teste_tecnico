@@ -513,8 +513,6 @@ func TestFinancialTransactionRollback(t *testing.T) {
 				return err
 			}
 
-			// Força falha após os três writes.
-			// A segunda inserção viola a PK/UNIQUE do Ledger.
 			if err := txLedgerRepository.Create(
 				ctx,
 				&ledgerEntry,

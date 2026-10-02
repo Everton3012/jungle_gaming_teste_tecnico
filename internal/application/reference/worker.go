@@ -241,8 +241,7 @@ func (w *Worker) processDurableBatch(
 			processed++
 
 		default:
-			// Infrastructure and concurrency failures keep the durable lease. Another
-			// instance will reclaim the record after the lease expires.
+
 			return processed, fmt.Errorf("resume pending reference %s: %w", claim.TransactionID, err)
 		}
 	}

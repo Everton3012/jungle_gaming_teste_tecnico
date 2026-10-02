@@ -388,10 +388,6 @@ func (s *Service) processAttempt(
 	return ProcessResult{}, false, err
 }
 
-// ProcessInTransaction executes the same financial use case inside a caller-owned
-// PostgreSQL transaction. It is used by the SQS inbox so inbox, wallet,
-// transaction, ledger and outbox changes are committed atomically. The caller is
-// responsible for commit/rollback and for retrying concurrency conflicts.
 func (s *Service) ProcessInTransaction(
 	ctx context.Context,
 	tx pgx.Tx,

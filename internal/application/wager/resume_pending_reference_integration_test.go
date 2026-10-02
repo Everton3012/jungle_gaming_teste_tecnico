@@ -65,11 +65,6 @@ func TestServiceResumePendingReference(t *testing.T) {
 		10000,
 	)
 
-	/*
-		Primeiro persistimos o REFUND como PENDING_REFERENCE.
-
-		Neste momento a BET referenciada ainda não existe.
-	*/
 	pendingRefund := newPendingRefund(
 		t,
 		"transaction-refund-resume",
@@ -113,14 +108,6 @@ func TestServiceResumePendingReference(t *testing.T) {
 		)
 	}
 
-	/*
-		Agora a BET referenciada chega e é processada.
-
-		Saldo:
-			10000
-			  ↓ BET 2000
-			 8000
-	*/
 	bet := newBet(
 		t,
 		"transaction-bet-resume",
@@ -154,20 +141,6 @@ func TestServiceResumePendingReference(t *testing.T) {
 		)
 	}
 
-	/*
-		Retomamos o REFUND.
-
-		Ele deve encontrar a BET por:
-			provider_id +
-			reference_external_transaction_id
-
-		e processar o crédito atomicamente.
-
-		Saldo:
-			8000
-			  ↓ REFUND 2000
-			10000
-	*/
 	resumeResult, err :=
 		env.service.ResumePendingReference(
 			ctx,
@@ -213,9 +186,6 @@ func TestServiceResumePendingReference(t *testing.T) {
 		)
 	}
 
-	/*
-		Confirma estado persistido.
-	*/
 	walletEntity, err :=
 		env.walletRepository.FindByID(
 			ctx,
@@ -265,17 +235,6 @@ func TestServiceResumePendingReference(t *testing.T) {
 		)
 	}
 
-	/*
-		Temos exatamente:
-
-			2 transactions
-				- BET
-				- REFUND
-
-			2 ledger entries
-				- débito BET
-				- crédito REFUND
-	*/
 	if countRows(t, env, "wager_transactions") != 2 {
 		t.Fatal(
 			"expected exactly two wager transactions",
@@ -288,11 +247,6 @@ func TestServiceResumePendingReference(t *testing.T) {
 		)
 	}
 
-	/*
-		Executar novamente deve ser replay.
-
-		Nenhum segundo crédito pode ocorrer.
-	*/
 	secondResult, err :=
 		env.service.ResumePendingReference(
 			ctx,

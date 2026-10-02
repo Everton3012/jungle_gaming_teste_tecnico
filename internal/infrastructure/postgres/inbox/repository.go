@@ -65,8 +65,6 @@ func NewRepository(db DBTX) (*Repository, error) {
 
 func (r *Repository) WithDB(db DBTX) (*Repository, error) { return NewRepository(db) }
 
-// Begin preserves the original repository API for the wager consumer while the
-// durable identity is actually scoped by consumer name in the database.
 func (r *Repository) Begin(ctx context.Context, messageID, payloadHash string, now time.Time) (*BeginResult, error) {
 	return r.BeginForConsumer(ctx, DefaultConsumerName, messageID, payloadHash, now)
 }

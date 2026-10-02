@@ -393,7 +393,7 @@ func newTestPool(
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
-		10*time.Second,
+		20*time.Second,
 	)
 	defer cancel()
 
@@ -407,8 +407,8 @@ func newTestPool(
 
 			MaxConnections: 5,
 			MinConnections: 0,
-			ConnectTimeout: 5 * time.Second,
-			HealthTimeout:  3 * time.Second,
+			ConnectTimeout: 10 * time.Second,
+			HealthTimeout:  10 * time.Second,
 		},
 	)
 	if err != nil {

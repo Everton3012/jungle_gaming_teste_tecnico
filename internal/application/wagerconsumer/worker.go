@@ -225,7 +225,7 @@ func (w *Worker) processAtomic(ctx context.Context, brokerMessage sqsinfra.Messa
 	if lastErr != nil {
 		return fmt.Errorf("process wager message %q atomically after retries: %w", durableID, lastErr)
 	}
-	_ = alreadyProcessed // both paths acknowledge only after commit.
+	_ = alreadyProcessed
 	return w.ack(ctx, durableID, receiptHandle)
 }
 
@@ -237,9 +237,9 @@ func isRetryableAtomicError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
-		case "40001", // serialization_failure
-			"40P01", // deadlock_detected
-			"23505": // unique_violation caused by a racing idempotent insert
+		case "40001",
+			"40P01",
+			"23505":
 			return true
 		}
 	}
@@ -253,7 +253,6 @@ func decodeTransportMessage(rawPayload []byte, awsMessageID string) (MessageEnve
 		return MessageEnvelope{}, TransactionMessage{}, awsMessageID, fmt.Errorf("decode wager message %q: %w", awsMessageID, err)
 	}
 
-	// Official transport envelope.
 	if strings.TrimSpace(envelope.MessageID) != "" || strings.TrimSpace(envelope.Type) != "" {
 		envelope.MessageID = strings.TrimSpace(envelope.MessageID)
 		envelope.Type = strings.TrimSpace(envelope.Type)

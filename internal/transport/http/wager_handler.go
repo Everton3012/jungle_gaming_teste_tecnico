@@ -24,7 +24,7 @@ import (
 	"jungle_gaming_teste_tecnico/internal/observability"
 )
 
-const maxRequestBodySize = 1 << 20 // 1 MiB
+const maxRequestBodySize = 1 << 20
 
 type WagerHandler struct {
 	service          *applicationwager.Service
